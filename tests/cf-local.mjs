@@ -8,18 +8,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import worker from '../worker/index.js';
+import { parseHeaders, headersFor } from '../server/headers-file.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.argv[process.argv.indexOf('--port') + 1] || 8790);
 const pool = new pg.Pool({ connectionString: process.env.QE_PG_URL });
 const SERVICE_KEY = 'local-service-key';
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.webmanifest': 'application/manifest+json', '.png': 'image/png' };
+const HEADER_RULES = parseHeaders(fs.readFileSync(path.join(root, 'app', '_headers'), 'utf8'));
 const ASSETS = { // like Cloudflare's static assets binding
   async fetch(request) {
     const p = new URL(request.url).pathname;
     const f = path.join(root, 'app', p === '/' ? 'index.html' : p.slice(1));
     if (!f.startsWith(path.join(root, 'app')) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) return new Response(null, { status: 404 });
-    return new Response(fs.readFileSync(f), { headers: { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream' } });
+    return new Response(fs.readFileSync(f), { headers: { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream', ...headersFor(HEADER_RULES, p) } });
   },
 };
 const env = { SUPABASE_URL: `http://localhost:${PORT}`, SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY, ALLOW_ANY_SUPABASE_URL: "1", OWNER_KEY: process.env.QE_OWNER_KEY, ASSETS };

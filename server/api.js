@@ -60,6 +60,7 @@ export async function handleApi(request, env) {
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
     'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
   };
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...cors } });
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -113,6 +114,8 @@ export async function handleApi(request, env) {
   if (!r.ok) {
     const code = data?.code;
     if (STATUS[code]) return json(STATUS[code], { error: data.message });
+    // Other data errors (for example text where a number belongs) are the caller's fault, not a server error.
+    if (typeof code === 'string' && code.startsWith('22')) return json(400, { error: 'Invalid input' });
     console.error('Supabase error', r.status, JSON.stringify(data));
     // Name the setup problem without echoing anything secret.
     let why = 'Server error';
