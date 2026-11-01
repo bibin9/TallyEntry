@@ -1,0 +1,9 @@
+node_modules/
+relay/config.json
+relay/data/
+connector/config.json
+connector/*.log
+test-results/
+*.log
+*.log.1
+connector/*.key

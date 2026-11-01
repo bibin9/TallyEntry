@@ -1,0 +1,41 @@
+;; QuickEntry for Tally - TDL add-on                               Version 0.1
+;; STATUS: NOT YET VERIFIED ON A LIVE TALLYPRIME. Test on a copy of the company first.
+;;
+;; What it does
+;;   1. Defines two user-defined fields (UDFs) that the QuickEntry connector reads and writes
+;;      through Tally's XML interface:
+;;        QECode   (String) on Ledger and Stock Item masters: the stable code used to match
+;;                 records between Tally and the app (for example C000123, I000045).
+;;        QETxnID  (String) on Vouchers: the app's permanent transaction ID, used to find the
+;;                 voucher again so a re-sent transaction is altered, never duplicated.
+;;   2. Shows QE Code (read-only) in Ledger and Stock Item alteration, so staff can see it.
+;;
+;; Install: copy this file to the Tally PC, then in TallyPrime:
+;;   F1 Help > TDLs & Add-ons > F4 Manage Local TDLs > Load TDL on startup: Yes
+;;   > List of TDL files: add the full path of QuickEntry.tdl. Restart TallyPrime.
+;;
+;; The UDF index numbers (30101, 30102) must not clash with other add-ons on the same PC.
+;; If they do, change both here AND tell us, because existing values are stored by index.
+
+[System: UDF]
+    QECode  : String : 30101
+    QETxnID : String : 30102
+
+;; ---- Display (optional). Part names below are the standard TallyPrime master screens;
+;; ---- VERIFY they exist in the client's release. Remove this block if Tally reports an error.
+
+[#Part: MST LED Basic Details]
+    Add : Line : At End : QE Code Line
+
+[#Part: STKI Basic]
+    Add : Line : At End : QE Code Line
+
+[Line: QE Code Line]
+    Fields : Medium Prompt, QE Code Field
+    Local  : Field : Medium Prompt : Info : "QuickEntry code"
+
+[Field: QE Code Field]
+    Use      : Name Field
+    Storage  : QECode
+    Skip     : Yes
+    Read Only: Yes

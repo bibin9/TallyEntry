@@ -1,0 +1,20 @@
+{
+  "name": "quickentry-for-tally",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Offline-capable field sales app for TallyPrime: PWA + cloud relay + office connector",
+  "scripts": {
+    "dev": "node relay/dev-server.js",
+    "mock-tally": "node mock-tally/server.js",
+    "connector": "node connector/index.js",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "node tests/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "pg": "^8.23.1"
+  }
+}
