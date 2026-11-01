@@ -11,6 +11,7 @@ The business requirements, architecture, hosting plan, costs and open questions 
 | App (PWA): offline entry, local storage, sync engine, PDF, print, share | Built and tested in Chromium (demo and live mode) |
 | Cloud API: Cloudflare Pages Function + Supabase/Postgres (`schema.sql`) | Built and tested against a local Postgres 16 and a local stand-in for Cloudflare. **Not yet deployed** to a real Cloudflare or Supabase account |
 | Office connector (Node.js) | Built and tested over HTTP against the **Tally simulator** |
+| Windows installer (`connector/windows`) | Written for Windows PowerShell 5.1; **not yet run on a Windows PC** |
 | TallyPrime XML requests, UDF layout, voucher alter by MasterID, TDL add-on | **Not verified on a live TallyPrime.** Written to Tally's documented XML interface; places to check are marked `VERIFY` in `app/core/tally-xml.js` and `tdl/QuickEntry.tdl` |
 | Demo mode | Uses a **simulated Tally** in the browser. Labelled "DEMO" on every screen |
 
@@ -42,6 +43,7 @@ functions/api/          Cloudflare Pages Function: the production sync API
 relay/supabase/         schema.sql (tables, row-level security, qe_api), new-tenant.mjs (keys)
 relay/dev-server.js     Self-hosted alternative: app + API + JSON-file storage in one Node process
 connector/              Office connector for the Tally PC (Node.js, no dependencies)
+  windows/              install.cmd: Windows setup (background task, protected key file), check.cmd, uninstall.cmd
 mock-tally/             Simulated Tally on port 9000 for testing the connector
 tdl/QuickEntry.tdl      Tally add-on: QE Code and QE Txn ID fields
 docs/SETUP.md           Setup: Supabase, Cloudflare Pages, office PC, devices, live verification

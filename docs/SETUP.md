@@ -36,23 +36,39 @@ Demo only: dragging the `app` folder into **Create > Pages > Upload assets** pub
 
 Check the XML port: on the Tally PC, open `http://localhost:9000` in a browser. It should say TallyPrime Server is running.
 
-**Connector**
+**Connector** (Windows 10 or 11, or Windows Server 2016 or later)
 
-1. Install Node.js 20 LTS (nodejs.org).
-2. Copy the project to `C:\QuickEntry` (the connector needs the `connector` and `app\core` folders).
-3. Copy `connector\config.example.json` to `connector\config.json` and set `tallyCompany` (exact company name in Tally) and `relayUrl` (your `https://<project>.pages.dev`). Leave `connectorKey` out.
-4. Set the connector key as a system environment variable, so it is not in a file: `setx /M QE_CONNECTOR_KEY "<key from step 4>"` in an administrator Command Prompt.
-5. Test once: `node C:\QuickEntry\connector\index.js --once`. It should log masters fetched and exit with no error.
-6. Run it as a Windows service with NSSM (nssm.cc), from an administrator prompt:
-   ```
-   nssm install QuickEntryConnector "C:\Program Files\nodejs\node.exe" "C:\QuickEntry\connector\index.js"
-   nssm set QuickEntryConnector AppDirectory C:\QuickEntry
-   nssm set QuickEntryConnector Start SERVICE_AUTO_START
-   nssm start QuickEntryConnector
-   ```
-7. Windows Defender Firewall: make sure **inbound** port 9000 is not open to other machines unless another office PC needs it. The connector only needs outbound HTTPS.
+1. Download the project from GitHub (**Code > Download ZIP**) or the connector package, and unzip it anywhere on the Tally PC.
+2. Open `connector\windows` and double-click **install.cmd**. Windows asks for administrator rights.
+3. Answer the questions:
+   - **Company name exactly as shown in TallyPrime**
+   - **App address**, for example `https://quickentry.pages.dev`
+   - **Connector key** from step 4. It is not shown as you paste it, and it is never put on the command line.
+4. If Node.js is missing, the installer offers to install Node.js LTS with winget. Without winget, install it from nodejs.org and run install.cmd again.
+5. The installer tests the connection and prints one line per check:
+   - TallyPrime answers on port 9000.
+   - The company is open in Tally.
+   - The cloud accepts the key.
 
-The connector logs to `connector\connector.log`. It retries every 30 seconds; if Tally is closed, nothing is lost.
+   A `FAIL` line says what to fix. The connector is installed anyway and keeps retrying.
+
+What it sets up:
+
+| Item | Where |
+| --- | --- |
+| Program | `C:\Program Files\QuickEntry` |
+| Settings, key, log | `C:\ProgramData\QuickEntry` (`config.json`, `connector.key`, `connector.log`). Only SYSTEM and Administrators can read this folder. |
+| Background task | Task Scheduler > **QuickEntry Connector**. Runs as SYSTEM when Windows starts, with no one signed in. It is re-checked every 5 minutes and starts again if it stopped. |
+
+Daily use:
+
+- **`C:\Program Files\QuickEntry\check.cmd`** tests the connection again and shows whether the task is running and the last log lines. Use it first when something does not reach Tally.
+- **Upgrade:** unzip the new version and run install.cmd again. Settings and key are kept. Add `-NewKey` to replace the key.
+- **Remove:** `C:\Program Files\QuickEntry\uninstall.cmd` (add `-RemoveData` to also delete settings, key and log). Nothing in Tally or the cloud is changed.
+
+TallyPrime must be open with the company loaded for entries to post; while it is closed, entries wait in the cloud and nothing is lost. The connector needs only outbound HTTPS. Keep inbound port 9000 closed in Windows Defender Firewall unless another office PC needs it.
+
+Manual run (for troubleshooting, from an administrator prompt): `node "C:\Program Files\QuickEntry\connector\index.js" --config "C:\ProgramData\QuickEntry\config.json" --once`
 
 ## 4. Add a client company and its users
 
