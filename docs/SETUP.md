@@ -6,7 +6,7 @@ Production uses three pieces: **Supabase** (database), **Cloudflare Pages** (app
 
 1. Create a project at supabase.com. Pick the region closest to the client (there is no UAE region; Mumbai or Frankfurt are the nearest options, see BRD Q9).
 2. Open **SQL Editor**, paste all of `relay/supabase/schema.sql`, and run it. It is safe to run again after updates.
-3. From **Project Settings > API**, copy the **Project URL** and the **service_role** key. Treat the service_role key like a password: it goes only into Cloudflare's secret settings.
+3. Copy the **Project URL** (Project Settings > Data API) and a **secret key** (Project Settings > API Keys > Secret keys, `sb_secret_...`; the legacy **service_role** key also works). Treat this key like a password: it goes only into Cloudflare's secret settings.
 
 The schema turns on row-level security with no public policies, so Supabase's public API exposes nothing. All access goes through the `qe_api` database function, which only the service role can call.
 
