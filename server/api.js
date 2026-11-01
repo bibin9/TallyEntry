@@ -7,6 +7,7 @@
 //   SUPABASE_URL               e.g. https://abcd1234.supabase.co
 //   SUPABASE_SERVICE_ROLE_KEY  service role key (never put this in the app)
 //   ALLOWED_ORIGIN             optional, defaults to the same origin only
+//   ALLOW_ANY_SUPABASE_URL     optional; set to 1 if Supabase uses a custom domain
 
 const ROUTES = {
   'GET /api/me': 'me',
@@ -65,15 +66,32 @@ export async function handleApi(request, env) {
   const key = env.SUPABASE_SERVICE_ROLE_KEY;
   const headers = { apikey: key, 'Content-Type': 'application/json' };
   if (key.startsWith('eyJ')) headers.Authorization = `Bearer ${key}`;
-  const r = await fetch(`${env.SUPABASE_URL.replace(/\/$/, '')}/rest/v1/rpc/qe_api`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ p_token_hash: await sha256(token), p_op: op, p_body: body }),
-  });
+  const base = env.SUPABASE_URL.trim().replace(/\/$/, '');
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(base) && !env.ALLOW_ANY_SUPABASE_URL) {
+    return json(500, { error: 'Server setup: SUPABASE_URL must look like https://<project-ref>.supabase.co (not the dashboard link)' });
+  }
+  let r;
+  try {
+    r = await fetch(`${base}/rest/v1/rpc/qe_api`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ p_token_hash: await sha256(token), p_op: op, p_body: body }),
+    });
+  } catch (e) {
+    console.error('Supabase unreachable', e);
+    return json(502, { error: 'Server setup: cannot reach Supabase at SUPABASE_URL' });
+  }
   const data = await r.json().catch(() => null);
   if (!r.ok) {
     const code = data?.code;
-    return json(STATUS[code] || 500, { error: STATUS[code] ? data.message : 'Server error' });
+    if (STATUS[code]) return json(STATUS[code], { error: data.message });
+    console.error('Supabase error', r.status, JSON.stringify(data));
+    // Name the setup problem without echoing anything secret.
+    let why = 'Server error';
+    if (!data) why = `Server setup: SUPABASE_URL did not answer like Supabase (HTTP ${r.status})`;
+    else if (r.status === 401 || r.status === 403) why = 'Server setup: Supabase rejected SUPABASE_SERVICE_ROLE_KEY (use the secret or service_role key, not the publishable/anon key)';
+    else if (code === 'PGRST202' || r.status === 404) why = 'Server setup: database function qe_api not found (run relay/supabase/schema.sql in Supabase)';
+    return json(500, { error: why });
   }
   return json(200, data);
 }
