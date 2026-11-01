@@ -1,6 +1,6 @@
 # Setup guide
 
-Production uses three pieces: **Supabase** (database), **Cloudflare Pages** (app and API), and the **QuickEntry connector** on the office PC that runs TallyPrime. Do steps 1 to 3 once; step 4 for each client company; steps 5 and 6 at the client.
+Production uses three pieces: **Supabase** (database), **Cloudflare** (app and API, as a Worker or Pages), and the **QuickEntry connector** on the office PC that runs TallyPrime. Do steps 1 to 3 once; step 4 for each client company; steps 5 and 6 at the client.
 
 ## 1. Supabase (database)
 
@@ -10,15 +10,25 @@ Production uses three pieces: **Supabase** (database), **Cloudflare Pages** (app
 
 The schema turns on row-level security with no public policies, so Supabase's public API exposes nothing. All access goes through the `qe_api` database function, which only the service role can call.
 
-## 2. Cloudflare Pages (app and API)
+## 2. Cloudflare (app and API)
 
-1. Put this project in a GitHub repository.
-2. Cloudflare dashboard > **Workers & Pages > Create > Pages > Connect to Git**, choose the repository.
-3. Build settings: Framework preset **None**, Build command **empty**, Build output directory **`app`**, Root directory **`/`**. Cloudflare picks up `functions/api/[[path]].js` automatically as the API.
-4. **Settings > Variables and secrets**, add as *Secret*: `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
-5. Deploy. The app is then at `https://<project>.pages.dev`; add a custom domain under **Custom domains** if wanted.
+The repository works both as a Cloudflare **Worker** (the default in the current dashboard) and as a **Pages** project. Use one of them.
 
-Every push to the main branch redeploys. Use a second branch for the staging environment (Cloudflare gives each branch its own preview address).
+**Worker (recommended)**
+
+1. Cloudflare dashboard > **Workers & Pages > Create > Import a repository**, choose the repository.
+2. Project name **`tallyentry`**. It must match `name` in `wrangler.jsonc`; if you pick another name, change it there too. Build command: **empty**. Deploy command: **`npx wrangler deploy`** (the default).
+3. Deploy. `wrangler.jsonc` tells Cloudflare to serve the `app` folder and run `worker/index.js` for `/api/*`.
+4. Worker > **Settings > Variables and secrets**, add as type **Secret**: `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Secrets added here are kept across deploys.
+5. The app is at `https://tallyentry.<your-account>.workers.dev`. Add a custom domain under **Settings > Domains & Routes** if wanted.
+
+Check: open `https://<address>/api/settings`. "Please sign in again" means the API runs. "Server not configured" means a secret is missing.
+
+**Pages (alternative)**
+
+Create > Pages > Connect to Git. Framework **None**, build command **empty**, output directory **`app`**. Cloudflare picks up `functions/api/[[path]].js` as the API. Add the same two secrets under Settings > Variables and secrets.
+
+Every push to the main branch redeploys either way.
 
 Demo only: dragging the `app` folder into **Create > Pages > Upload assets** publishes the demo without an API.
 

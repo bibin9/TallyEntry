@@ -39,7 +39,9 @@ app/                    The PWA (static files, no build step) - deploy this fold
     vat.js, types.js    Configurable tax maths; transaction type definitions
   js/                   UI (main.js), IndexedDB (db.js), sync engine (sync.js), documents (docs.js)
   sw.js                 Service worker: app opens with no internet
-functions/api/          Cloudflare Pages Function: the production sync API
+server/api.js           The production sync API (Cloudflare): hashes the key, calls qe_api in Supabase
+worker/index.js         Cloudflare Worker entry (wrangler.jsonc): /api/* to the API, the rest from app/
+functions/api/          Same API as a Cloudflare Pages Function (if deployed as Pages)
 relay/supabase/         schema.sql (tables, row-level security, qe_api), new-tenant.mjs (keys)
 relay/dev-server.js     Self-hosted alternative: app + API + JSON-file storage in one Node process
 connector/              Office connector for the Tally PC (Node.js, no dependencies)
