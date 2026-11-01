@@ -81,3 +81,7 @@ nav.tabs a.plus{flex:none;width:52px;height:52px;margin-top:-18px;border-radius:
 @media (max-width:600px){.paper .doc{min-width:0;padding:10px;font-size:12px}.paper .doc-tbl{font-size:11px}.paper .doc-tbl th:nth-child(6),.paper .doc-tbl td:nth-child(6),.paper .doc-tbl th:nth-child(7),.paper .doc-tbl td:nth-child(7),.paper .doc-tbl th:nth-child(1),.paper .doc-tbl td:nth-child(1){display:none}.paper .doc-tbl td,.paper .doc-tbl th{padding:5px 3px}.paper .doc-tot{min-width:0;width:100%}.paper .doc-head,.paper .doc-meta{flex-direction:column;gap:6px}.paper .doc-title,.paper .doc-right{text-align:left}}
 .doc-logo{max-height:56px;max-width:200px;display:block;margin-bottom:6px}
 .logo-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.logo-prev{max-height:48px;max-width:160px;border:1px solid var(--line);border-radius:6px;padding:4px;background:#fff}.logo-row input[type=file]{flex:1;min-width:180px;font-size:14px}
+.urow{padding:10px 0;border-bottom:1px solid #e3e7ef}.urow:last-of-type{border-bottom:0}.urow.off b{color:var(--mute);text-decoration:line-through}
+.urow .btns{margin-top:6px}.keycard{border:2px solid var(--green)}
+code.key{display:block;font-size:15px;word-break:break-all;background:#f3f6fb;border-radius:8px;padding:10px;margin:8px 0;user-select:all}
+a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-content:center}

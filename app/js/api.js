@@ -32,4 +32,8 @@ export class HttpApi {
   resolve(id, choice) { return this._call('POST', '/api/txns/resolve', { id, choice }); }
   log() { return this._call('GET', '/api/log'); }
   connectorStatus() { return this._call('GET', '/api/connector-status'); }
+  users() { return this._call('GET', '/api/users'); }
+  addUser(u) { return this._call('POST', '/api/users', u); }
+  updateUser(u) { return this._call('POST', '/api/users/update', u); }
+  resetUserKey(id) { return this._call('POST', '/api/users/resetkey', { id }); }
 }

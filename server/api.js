@@ -8,6 +8,9 @@
 //   SUPABASE_SERVICE_ROLE_KEY  service role key (never put this in the app)
 //   ALLOWED_ORIGIN             optional, defaults to the same origin only
 //   ALLOW_ANY_SUPABASE_URL     optional; set to 1 if Supabase uses a custom domain
+//   OWNER_KEY                  optional; a long random key that unlocks /owner.html (create companies)
+
+import { defaultSettings } from '../app/core/defaults.js';
 
 const ROUTES = {
   'GET /api/me': 'me',
@@ -26,6 +29,19 @@ const ROUTES = {
   'POST /api/connector/reconcile': 'connector.reconcile',
   'GET /api/connector/queue': 'connector.queue',
   'POST /api/connector/result': 'connector.result',
+  // company admin: manage the company's users
+  'GET /api/users': 'users.list',
+  'POST /api/users': 'users.add',
+  'POST /api/users/update': 'users.update',
+  'POST /api/users/resetkey': 'users.resetkey',
+  // owner (OWNER_KEY): manage client companies
+  'GET /api/owner/tenants': 'owner.tenants',
+  'POST /api/owner/tenants': 'owner.tenant.create',
+  'POST /api/owner/connectorkey': 'owner.tenant.connectorkey',
+  'GET /api/owner/users': 'owner.users.list',
+  'POST /api/owner/users': 'owner.users.add',
+  'POST /api/owner/users/update': 'owner.users.update',
+  'POST /api/owner/users/resetkey': 'owner.users.resetkey',
 };
 const STATUS = { '28000': 401, '42501': 403, '22023': 400 };
 
@@ -61,6 +77,18 @@ export async function handleApi(request, env) {
     try { body = text ? JSON.parse(text) : {}; } catch { return json(400, { error: 'Bad JSON' }); }
   }
 
+  // Owner operations are checked here against the OWNER_KEY secret and sent with no user key;
+  // everything else is checked by the database against the key's hash.
+  let tokenHash;
+  if (op.startsWith('owner.')) {
+    if (!env.OWNER_KEY || env.OWNER_KEY.length < 24) return json(404, { error: 'Owner access is not set up: add an OWNER_KEY secret (at least 24 characters)' });
+    if ((await sha256(token)) !== (await sha256(env.OWNER_KEY))) return json(401, { error: 'Wrong owner key' });
+    tokenHash = null;
+    if (op === 'owner.tenant.create' && body && typeof body === 'object' && !body.settings) body.settings = defaultSettings(String(body.name || ''));
+  } else {
+    tokenHash = await sha256(token);
+  }
+
   // Supabase accepts either the legacy service_role key (a JWT, also sent as Bearer) or a new
   // secret key (sb_secret_..., not a JWT: send it only as apikey).
   const key = env.SUPABASE_SERVICE_ROLE_KEY;
@@ -75,7 +103,7 @@ export async function handleApi(request, env) {
     r = await fetch(`${base}/rest/v1/rpc/qe_api`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ p_token_hash: await sha256(token), p_op: op, p_body: body }),
+      body: JSON.stringify({ p_token_hash: tokenHash, p_op: op, p_body: body }),
     });
   } catch (e) {
     console.error('Supabase unreachable', e);

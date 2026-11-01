@@ -1,5 +1,6 @@
 // HTTP routing for the relay, independent of the HTTP server used.
-// auth: { users: token -> {tenant, id, name, code, role}, connectors: key -> tenant }
+// auth: { users: token -> {tenant, id, name, code, role, active}, connectors: key -> tenant, save?() }
+import { usersOp } from './users-core.js';
 
 export async function handleApi(core, auth, { method, path, query = {}, body = {}, token }) {
   const ok = (data) => ({ status: 200, data });
@@ -18,8 +19,9 @@ export async function handleApi(core, auth, { method, path, query = {}, body = {
     return err(404, 'Not found');
   }
 
+  if (path.startsWith('/api/owner/')) return err(404, 'Owner screens need the Cloudflare + Supabase setup');
   const user = auth.users[token];
-  if (!user) return err(401, 'Please sign in again');
+  if (!user || user.active === false) return err(401, 'Please sign in again');
   const tid = user.tenant;
   switch (`${method} ${path}`) {
     case 'GET /api/me': return ok({ id: user.id, name: user.name, code: user.code, role: user.role, tenant: tid });
@@ -36,6 +38,15 @@ export async function handleApi(core, auth, { method, path, query = {}, body = {
       return ok(await core.resolveConflict(tid, body.id, body.choice));
     case 'GET /api/log': return ok(await core.getLog(tid));
     case 'GET /api/connector-status': return ok(await core.connectorStatus(tid));
+    case 'GET /api/users': case 'POST /api/users': case 'POST /api/users/update': case 'POST /api/users/resetkey': {
+      if (user.role !== 'admin') return err(403, 'Only an office admin can manage users');
+      const op = { 'GET /api/users': 'users.list', 'POST /api/users': 'users.add', 'POST /api/users/update': 'users.update', 'POST /api/users/resetkey': 'users.resetkey' }[`${method} ${path}`];
+      try {
+        const r = usersOp(auth.users, tid, user.id, op, body);
+        if (op !== 'users.list') await auth.save?.();
+        return ok(r);
+      } catch (e) { if (e.status) return err(e.status, e.message); throw e; }
+    }
     default: return err(404, 'Not found');
   }
 }

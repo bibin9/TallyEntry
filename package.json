@@ -9,7 +9,8 @@
     "mock-tally": "node mock-tally/server.js",
     "connector": "node connector/index.js",
     "test": "node --test tests/*.test.mjs",
-    "test:e2e": "node tests/e2e.mjs"
+    "test:e2e": "node tests/e2e.mjs",
+    "test:e2e-users": "node tests/e2e-users.mjs"
   },
   "engines": {
     "node": ">=18"
