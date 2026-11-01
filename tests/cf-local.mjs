@@ -22,7 +22,7 @@ const ASSETS = { // like Cloudflare's static assets binding
     return new Response(fs.readFileSync(f), { headers: { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream' } });
   },
 };
-const env = { SUPABASE_URL: `http://localhost:${PORT}`, SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY, ASSETS };
+const env = { SUPABASE_URL: `http://localhost:${PORT}`, SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY, ALLOW_ANY_SUPABASE_URL: "1", OWNER_KEY: process.env.QE_OWNER_KEY, ASSETS };
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);

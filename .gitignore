@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 relay/config.json
 relay/data/
 connector/config.json

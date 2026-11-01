@@ -80,21 +80,38 @@ TallyPrime must be open with the company loaded for entries to post; while it is
 
 Manual run (for troubleshooting, from an administrator prompt): `node "C:\Program Files\QuickEntry\connector\index.js" --config "C:\ProgramData\QuickEntry\config.json" --once`
 
-## 4. Add a client company and its users
+## 4. Add a client company and its users (no SQL)
 
-```
-node relay/supabase/new-tenant.mjs --id al-noor --name "Al Noor Trading LLC" --user "Office Admin:ADM:admin" --user "Ahmed:AHM:sales"
-```
+**One-time: owner key.** Make a long random key, for example with a password manager (at least 24 characters). Add it to the Worker under **Settings > Variables and secrets** as a **Secret** named `OWNER_KEY`. Keep it private: it can create companies and reset any key.
 
-It prints SQL to run in Supabase and the keys: one connector key (for step 3) and one sign-in key per user. Only hashes are stored; if a key is lost, create a new one.
+**New client company.** Open `https://<your-app-address>/owner.html` and enter the owner key. Then fill in **New client company**:
+- company name,
+- company ID (suggested from the name),
+- first office admin's name and code.
 
-Match the ledger names in Tally (SQL editor, one line per name that differs):
+Click **Create company**. Two keys are shown once:
+- the **admin's sign-in key**, which can be sent by WhatsApp as a one-tap sign-in link,
+- the **office connector key** for `install.cmd` on the client's Tally PC.
 
-```
-update tenants set settings = jsonb_set(settings, '{ledgerMap,salesLedger}', '"Sales Local"') where id = 'al-noor';
-```
+**Salespeople.** The client's office admin opens the app and goes to **More > Users and sign-in keys**. For each person they enter the name, a 2 to 6 letter code (used in document numbers, for example SI-AHM-0001) and a role:
+- **Sales**: creates entries.
+- **Office admin**: also manages settings, users and conflicts.
 
-Keys in `ledgerMap`: `salesLedger`, `purchaseLedger`, `outputTaxLedger`, `inputTaxLedger`, `roundOffLedger`, `cashLedger`. Company name, address and TRN for documents are under `settings.company`. VAT rates can be changed by an admin in the app (More > VAT settings).
+The key is shown once, with **Send by WhatsApp**. The message holds a link that fills in the key on the phone.
+
+| To do this | Use |
+| --- | --- |
+| Lost phone or a person leaves | **New key** (the old key stops working at once) or **Switch off** |
+| Admin lost their own key | Owner page > the company > **Users** > **New key** |
+| Tally PC replaced or connector key exposed | Owner page > **New connector key**, then run `install.cmd -NewKey` on the Tally PC |
+
+Safety rules: an admin cannot switch themselves off or demote themselves, and every company keeps at least one active admin. Keys are stored only as SHA-256 hashes.
+
+Tally ledger names, company details, logo and VAT are set by the office admin in the app under **More**.
+
+**After updating the code:** run `relay/supabase/schema.sql` again in the Supabase SQL editor. It's safe to re-run, and it adds new database functions.
+
+Command-line alternative: `node relay/supabase/new-tenant.mjs --id al-noor --name "Al Noor Trading LLC" --user "Office Admin:ADM:admin"` prints SQL and keys.
 
 ## 5. Phones, tablets and PCs
 

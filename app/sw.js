@@ -1,6 +1,6 @@
 // Service worker: keeps the app shell on the device so it opens with no internet.
 // API calls (/api/...) are never cached; data lives in IndexedDB.
-const VERSION = 'qe-0.1.3';
+const VERSION = 'qe-0.2.0';
 const SHELL = [
   './',
   './core/connector-core.js',
@@ -10,6 +10,7 @@ const SHELL = [
   './core/tally-sim.js',
   './core/tally-xml.js',
   './core/types.js',
+  './core/users-core.js',
   './core/vat.js',
   './core/xml.js',
   './css/app.css',
@@ -21,8 +22,10 @@ const SHELL = [
   './js/demo-backend.js',
   './js/docs.js',
   './js/main.js',
+  './js/owner.js',
   './js/sync.js',
   './manifest.webmanifest',
+  './owner.html',
   './vendor/jspdf.umd.min.js',
 ];
 

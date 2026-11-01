@@ -195,6 +195,111 @@ begin
   return case when v_old is null then 'added' else 'updated' end;
 end $$;
 
+-- New random key (about 240 bits, URL-safe) and its SHA-256 hash, as the app sends it.
+create or replace function qe_new_key() returns text language sql volatile as $$
+  select rtrim(translate(encode(decode(replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', ''), 'hex'), 'base64'), '+/', '-_'), '=')
+$$;
+create or replace function qe_hash(p_key text) returns text language sql immutable as $$
+  select encode(sha256(convert_to(p_key, 'UTF8')), 'hex')
+$$;
+
+-- User management for one company. p_caller is the signed-in admin's user id, or null for the owner.
+create or replace function qe_users(p_tid text, p_caller text, p_op text, p_body jsonb)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_id text; v_code text; v_role text; v_key text; v_user app_users; v_admins int;
+begin
+  if p_op = 'users.list' then
+    return coalesce((select jsonb_agg(jsonb_build_object('id', id, 'name', name, 'code', code, 'role', role,
+      'active', active, 'createdAt', created_at) order by active desc, name) from app_users where tenant_id = p_tid), '[]'::jsonb);
+  end if;
+
+  if p_op = 'users.add' then
+    v_code := upper(trim(coalesce(p_body->>'code', '')));
+    v_role := coalesce(p_body->>'role', 'sales');
+    if coalesce(trim(p_body->>'name'), '') = '' then raise exception 'Enter a name' using errcode = '22023'; end if;
+    if v_code !~ '^[A-Z0-9]{2,6}$' then raise exception 'Code must be 2 to 6 letters or digits, for example AHM' using errcode = '22023'; end if;
+    if v_role not in ('sales', 'admin') then raise exception 'Role must be sales or admin' using errcode = '22023'; end if;
+    if exists (select 1 from app_users where tenant_id = p_tid and code = v_code) then
+      raise exception 'Code % is already used in this company', v_code using errcode = '22023';
+    end if;
+    v_id := p_tid || '-' || lower(v_code);
+    v_key := qe_new_key();
+    insert into app_users (id, tenant_id, name, code, role, token_hash)
+      values (v_id, p_tid, trim(p_body->>'name'), v_code, v_role, qe_hash(v_key));
+    return jsonb_build_object('id', v_id, 'name', trim(p_body->>'name'), 'code', v_code, 'role', v_role, 'active', true, 'key', v_key);
+  end if;
+
+  select * into v_user from app_users where tenant_id = p_tid and id = p_body->>'id';
+  if not found then raise exception 'User not found' using errcode = '22023'; end if;
+
+  if p_op = 'users.update' then
+    v_role := coalesce(p_body->>'role', v_user.role);
+    if v_role not in ('sales', 'admin') then raise exception 'Role must be sales or admin' using errcode = '22023'; end if;
+    if v_user.id = p_caller and (v_role <> 'admin' or (p_body ? 'active' and not (p_body->>'active')::boolean)) then
+      raise exception 'You cannot switch off or demote yourself' using errcode = '22023';
+    end if;
+    update app_users set
+      name = coalesce(nullif(trim(p_body->>'name'), ''), name),
+      role = v_role,
+      active = coalesce((p_body->>'active')::boolean, active)
+    where id = v_user.id;
+    select count(*) into v_admins from app_users where tenant_id = p_tid and role = 'admin' and active;
+    if v_admins = 0 then raise exception 'A company needs at least one active admin' using errcode = '22023'; end if;
+    return (select jsonb_build_object('id', id, 'name', name, 'code', code, 'role', role, 'active', active) from app_users where id = v_user.id);
+  end if;
+
+  if p_op = 'users.resetkey' then
+    v_key := qe_new_key();
+    update app_users set token_hash = qe_hash(v_key) where id = v_user.id;
+    return jsonb_build_object('id', v_user.id, 'key', v_key);
+  end if;
+
+  raise exception 'Unknown operation %', p_op using errcode = '22023';
+end $$;
+
+-- Owner operations: create client companies. The Worker only allows these with the OWNER_KEY secret.
+create or replace function qe_owner(p_op text, p_body jsonb)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+  v_tid text; v_ckey text; v_admin jsonb;
+begin
+  if p_op = 'owner.tenants' then
+    return coalesce((select jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name, 'createdAt', t.created_at,
+      'connectorLastSeen', t.connector_last_seen, 'connectorVersion', t.connector_version,
+      'users', (select count(*) from app_users u where u.tenant_id = t.id and u.active)) order by t.created_at) from tenants t), '[]'::jsonb);
+  end if;
+
+  if p_op = 'owner.tenant.create' then
+    v_tid := lower(trim(coalesce(p_body->>'id', '')));
+    if v_tid !~ '^[a-z0-9][a-z0-9-]{1,39}$' then
+      raise exception 'Company ID must be 2 to 40 lowercase letters, digits or dashes, for example al-noor' using errcode = '22023';
+    end if;
+    if coalesce(trim(p_body->>'name'), '') = '' then raise exception 'Enter the company name' using errcode = '22023'; end if;
+    if exists (select 1 from tenants where id = v_tid) then raise exception 'Company ID % already exists', v_tid using errcode = '22023'; end if;
+    if p_body->'settings' is null then raise exception 'Missing settings' using errcode = '22023'; end if;
+    v_ckey := qe_new_key();
+    insert into tenants (id, name, settings, connector_key_hash) values (v_tid, trim(p_body->>'name'), p_body->'settings', qe_hash(v_ckey));
+    v_admin := qe_users(v_tid, null, 'users.add', jsonb_build_object('name', p_body->>'adminName', 'code', p_body->>'adminCode', 'role', 'admin'));
+    return jsonb_build_object('id', v_tid, 'name', trim(p_body->>'name'), 'connectorKey', v_ckey, 'admin', v_admin);
+  end if;
+
+  v_tid := p_body->>'tenant';
+  if not exists (select 1 from tenants where id = v_tid) then raise exception 'Company not found' using errcode = '22023'; end if;
+
+  if p_op = 'owner.tenant.connectorkey' then
+    v_ckey := qe_new_key();
+    update tenants set connector_key_hash = qe_hash(v_ckey) where id = v_tid;
+    return jsonb_build_object('id', v_tid, 'connectorKey', v_ckey);
+  end if;
+
+  if p_op in ('owner.users.list', 'owner.users.add', 'owner.users.update', 'owner.users.resetkey') then
+    return qe_users(v_tid, null, substr(p_op, 7), p_body);
+  end if;
+
+  raise exception 'Unknown operation %', p_op using errcode = '22023';
+end $$;
+
 -- ---------------------------------------------------------------------------------------
 -- The whole sync API in one entry point. Mirrors app/core/relay-core.js.
 create or replace function qe_api(p_token_hash text, p_op text, p_body jsonb default '{}'::jsonb)
@@ -204,7 +309,11 @@ declare
   cur txns; m sync_mappings; v_ver int; v_kind text; v_res text; v_counts jsonb; v_n int; v_since bigint;
   v_stale boolean; v_names jsonb; v_items jsonb;
 begin
-  if p_op like 'connector.%' then
+  if p_op like 'owner.%' then
+    -- Owner calls carry no user key; the Worker checks the OWNER_KEY secret before sending them.
+    if p_token_hash is not null then raise exception 'Not allowed' using errcode = '42501'; end if;
+    return qe_owner(p_op, p_body);
+  elsif p_op like 'connector.%' then
     select * into t from tenants where connector_key_hash = p_token_hash;
     if not found then raise exception 'Invalid connector key' using errcode = '28000'; end if;
     v_tid := t.id;
@@ -295,6 +404,10 @@ begin
     return jsonb_build_object('state', t.connector_state, 'lastSeen', t.connector_last_seen, 'version', t.connector_version, 'tallyOk', t.connector_tally_ok);
 
   -- ------------------------------------------------------------- connector operations
+  elsif p_op like 'users.%' then
+    if u.role <> 'admin' then raise exception 'Only an office admin can manage users' using errcode = '42501'; end if;
+    return qe_users(v_tid, u.id, p_op, p_body);
+
   elsif p_op = 'connector.hello' then
     update tenants set connector_last_seen = now(), connector_version = p_body->>'version', connector_tally_ok = (p_body->>'tallyOk')::boolean where id = v_tid;
     return jsonb_build_object('state', t.connector_state, 'settings', t.settings);
@@ -378,9 +491,21 @@ begin
   raise exception 'Unknown operation %', p_op using errcode = '22023';
 end $$;
 
-revoke all on function qe_api(text, text, jsonb) from public;
--- Supabase: only the service role (used by the Cloudflare Pages Function) may call it.
-do $$ begin
+-- Only the service role (used by the Cloudflare Worker / Pages Function) may call these.
+-- Supabase grants EXECUTE on new functions to anon and authenticated by default, so revoke
+-- from those roles explicitly, not only from public.
+do $$
+declare f text; r text;
+begin
+  foreach f in array array['qe_api(text, text, jsonb)', 'qe_users(text, text, text, jsonb)', 'qe_owner(text, jsonb)',
+                           'qe_new_key()', 'qe_hash(text)', 'qe_next_seq(text)', 'qe_log(text, text, text, text, integer, text, text, jsonb)',
+                           'qe_txn_total(jsonb)', 'qe_upsert_master(text, text, jsonb)'] loop
+    if to_regprocedure(f) is null then continue; end if;
+    execute format('revoke all on function %s from public', f);
+    foreach r in array array['anon', 'authenticated'] loop
+      if exists (select 1 from pg_roles where rolname = r) then execute format('revoke all on function %s from %I', f, r); end if;
+    end loop;
+  end loop;
   if exists (select 1 from pg_roles where rolname = 'service_role') then
     execute 'grant execute on function qe_api(text, text, jsonb) to service_role';
   end if;

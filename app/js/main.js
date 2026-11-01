@@ -2,7 +2,7 @@
 // sync engine; this file only renders screens and handles input.
 
 import { db, requestPersistence } from './db.js';
-import { HttpApi } from './api.js';
+import { HttpApi, NetworkError } from './api.js';
 import { SyncEngine } from './sync.js';
 import { TYPES, TYPE_ORDER } from '../core/types.js';
 import { calcDoc, rateFor } from '../core/vat.js';
@@ -51,6 +51,13 @@ async function boot() {
   await S.sync.init();
   await loadMasters();
   await loadTxns();
+  // A sign-in link sent by the admin (#connect=KEY): fill in the key on the Connection card and
+  // take the key out of the address bar and history.
+  if (location.hash.startsWith('#connect=')) {
+    S.prefillToken = decodeURIComponent(location.hash.slice('#connect='.length));
+    history.replaceState(null, '', location.pathname + '#more');
+    setTimeout(() => toast('Sign-in key filled in. Tap "Use live mode".'), 300);
+  }
   window.addEventListener('hashchange', route);
   route();
   S.sync.start();
@@ -345,12 +352,12 @@ VIEWS.more = async () => {
     <div class="card"><div class="sec">Connection</div>
       <p class="small">Live mode connects to your QuickEntry server, which relays to the connector on the office Tally PC. The sign-in key comes from your office admin.</p>
       <label>Server address</label><input id="c-url" value="${esc(conn.url || '')}" placeholder="Leave empty if the app is opened from your QuickEntry address">
-      <label>Sign-in key</label><input id="c-token" type="password" value="${esc(conn.token || '')}" autocomplete="off">
+      <label>Sign-in key</label><input id="c-token" type="password" value="${esc(S.prefillToken || conn.token || '')}" autocomplete="off">
       <div class="btns"><button class="btn" data-act="golive">Use live mode</button>${S.mode === 'live' ? '<button class="btn ghost" data-act="godemo">Switch to demo</button>' : ''}</div>
       <p class="small muted">Switching mode clears transactions on this device after confirming none are unsynced.</p></div>
     <div class="card"><div class="sec">${esc(tax.taxLabel)} and documents</div>
       <p class="small">Rates: ${tax.rates.map((r) => `${esc(r.label)}`).join(', ')} · Prices ${tax.pricesIncludeTax ? 'include' : 'exclude'} ${esc(tax.taxLabel)} · Rounding per ${tax.rounding === 'line' ? 'line' : 'document'} · ${esc(tax.currency)}</p>
-      ${S.me.role === 'admin' ? `<div class="btns"><button class="btn ghost" data-go="taxsettings">${esc(tax.taxLabel)} settings</button><button class="btn ghost" data-go="company">Company and documents</button><button class="btn ghost" data-go="ledgermap">Tally ledger names</button></div>` : '<p class="small muted">Set by the office admin.</p>'}</div>
+      ${S.me.role === 'admin' ? `<div class="btns"><button class="btn ghost" data-go="taxsettings">${esc(tax.taxLabel)} settings</button><button class="btn ghost" data-go="company">Company and documents</button><button class="btn ghost" data-go="ledgermap">Tally ledger names</button><button class="btn ghost" data-go="users">Users and sign-in keys</button></div>` : '<p class="small muted">Set by the office admin.</p>'}</div>
     <div class="card small muted">QuickEntry for Tally 0.1. Data on this device: ${S.ledgers.length.toLocaleString()} ledgers, ${S.items.length.toLocaleString()} items, ${S.txns.length} transactions.</div>
   </main>`;
 };
@@ -417,6 +424,37 @@ VIEWS.ledgermap = async () => {
       ${m[k] && !names.has(m[k]) ? `<div class="err small">Not found in the ledgers synced from Tally</div>` : ''}`).join('')}
   </div><div id="formerr" class="err"></div><button class="btn full" data-act="saveledgers">Save for all users</button></main>`;
 };
+
+VIEWS.users = async () => {
+  let list, problem = '';
+  try { list = await S.api.users(); } catch (e) { problem = e instanceof NetworkError ? 'Managing users needs an internet connection.' : e.message; }
+  const k = S.newKey;
+  S.newKey = null; // a key is shown once
+  const keyCard = k ? `<div class="card keycard"><div class="sec">Sign-in key for ${esc(k.name)}</div>
+      <p class="small">Shown only now. Send it to ${esc(k.name)} privately. On their phone: open the link, then tap <b>Use live mode</b>.</p>
+      <code class="key" id="newkey">${esc(k.key)}</code>
+      <div class="btns"><button class="btn sm" data-act="copykey" data-k="${esc(k.key)}">Copy key</button>
+      <a class="btn sm wa" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(keyMessage(k))}">Send by WhatsApp</a></div></div>` : '';
+  const rows = (list || []).map((u) => {
+    const self = u.id === S.me.id;
+    return `<div class="urow ${u.active ? '' : 'off'}"><div><b>${esc(u.name)}</b> <span class="muted small">${esc(u.code)} · ${u.role === 'admin' ? 'Office admin' : 'Sales'}${u.active ? '' : ' · switched off'}${self ? ' · you' : ''}</span></div>
+      <div class="btns"><button class="btn sm ghost" data-act="userkey" data-id="${esc(u.id)}" data-name="${esc(u.name)}">New key</button>
+      ${self ? '' : `<button class="btn sm ghost" data-act="userrole" data-id="${esc(u.id)}" data-role="${u.role === 'admin' ? 'sales' : 'admin'}">Make ${u.role === 'admin' ? 'sales' : 'admin'}</button>
+      <button class="btn sm ghost" data-act="usertoggle" data-id="${esc(u.id)}" data-on="${u.active ? 0 : 1}">${u.active ? 'Switch off' : 'Switch on'}</button>`}</div></div>`;
+  }).join('');
+  return `${header('Users and sign-in keys', 'more')}<main class="form">${keyCard}
+    ${problem ? `<div class="card err">${esc(problem)}</div>` : `<div class="card"><div class="sec">People in ${esc(S.settings.company.name)}</div>${rows || '<p class="muted">No users.</p>'}
+      <p class="small muted">"New key" signs the person out of their old key at once, for a lost phone or a leaver. "Switch off" blocks sign-in until switched on.</p></div>
+    <div class="card"><div class="sec">Add a person</div>
+      <label>Name</label><input id="nu-name" autocomplete="off">
+      <label>Code (2 to 6 letters, used in document numbers, for example SI-AHM-0001)</label><input id="nu-code" maxlength="6" autocapitalize="characters" autocomplete="off">
+      <label>Role</label><select id="nu-role"><option value="sales">Sales: create entries</option><option value="admin">Office admin: also settings, users and conflicts</option></select>
+      <div id="formerr" class="err"></div><button class="btn full" data-act="useradd">Add and create key</button></div>`}</main>`;
+};
+
+function keyMessage(k) {
+  return `QuickEntry sign-in for ${k.name}\nOpen this link on your phone, then tap "Use live mode":\n${location.origin}/#connect=${k.key}\nKeep this message private.`;
+}
 
 VIEWS.taxsettings = async () => {
   const tax = S.settings.tax;
@@ -497,6 +535,17 @@ document.addEventListener('click', async (e) => {
       const t = await db.get('txns', a.dataset.id); t.status = 'sent'; t.conflict = null; await db.put('txns', t);
       toast('Decision sent'); setTimeout(() => S.sync.syncNow(), 600); render(true);
     } else if (act === 'golive' || act === 'godemo') await switchMode(act === 'golive' ? 'live' : 'demo');
+    else if (act === 'useradd') {
+      const r = await S.api.addUser({ name: $('#nu-name').value, code: $('#nu-code').value, role: $('#nu-role').value });
+      S.newKey = { name: r.name, key: r.key }; render();
+    } else if (act === 'userkey') {
+      if (!confirm(`Create a new sign-in key for ${a.dataset.name}? Their current key stops working at once.`)) return;
+      const r = await S.api.resetUserKey(a.dataset.id);
+      if (r.id === S.me.id) { const c = await db.meta('connection'); if (c) { c.token = r.key; await db.meta('connection', c); } if (S.api.token !== undefined) S.api.token = r.key; }
+      S.newKey = { name: a.dataset.name, key: r.key }; render();
+    } else if (act === 'usertoggle') { await S.api.updateUser({ id: a.dataset.id, active: a.dataset.on === '1' }); toast(a.dataset.on === '1' ? 'Switched on' : 'Switched off. That key no longer signs in.'); render(true); }
+    else if (act === 'userrole') { await S.api.updateUser({ id: a.dataset.id, role: a.dataset.role }); toast('Role changed'); render(true); }
+    else if (act === 'copykey') { await navigator.clipboard.writeText(a.dataset.k).then(() => toast('Key copied'), () => toast('Select the key and copy it')); }
     else if (act === 'savetax') await saveTax();
     else if (act === 'savecompany') await saveCompany();
     else if (act === 'saveledgers') await saveLedgers();

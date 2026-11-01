@@ -8,6 +8,7 @@ import { TallySim } from '../core/tally-sim.js';
 import { defaultSettings } from '../core/defaults.js';
 import { db } from './db.js';
 import { NetworkError } from './api.js';
+import { usersOp, newKey } from '../core/users-core.js';
 
 const TID = 'demo';
 
@@ -22,6 +23,10 @@ export class DemoBackend {
     const saved = await db.get('demo', 'state');
     const st = saved?.value;
     this.flags = st?.flags || { internet: true, tallyOn: true };
+    this.userKeys = st?.users || {
+      [newKey()]: { id: 'demo-user', tenant: TID, name: 'Demo Salesperson', code: 'DEMO', role: 'admin', active: true },
+      [newKey()]: { id: 'demo-ahm', tenant: TID, name: 'Ahmed (Sales)', code: 'AHM', role: 'sales', active: true },
+    };
     this.sim = new TallySim(st?.tally);
     this.core = new RelayCore(st?.relay, () => this._save());
     const t = this.core.tenant(TID);
@@ -39,7 +44,7 @@ export class DemoBackend {
 
   _save(now) {
     clearTimeout(this._st);
-    const doIt = () => db.put('demo', { key: 'state', value: { flags: this.flags, tally: this.sim.s, relay: this.core.s } });
+    const doIt = () => db.put('demo', { key: 'state', value: { flags: this.flags, users: this.userKeys, tally: this.sim.s, relay: this.core.s } });
     if (now) return doIt();
     this._st = setTimeout(doIt, 300);
   }
@@ -67,6 +72,11 @@ export class DemoBackend {
   async resolve(id, choice) { this._net(); const r = await this.core.resolveConflict(TID, id, choice); setTimeout(() => this.tick(), 300); return r; }
   async log() { return this.core.getLog(TID); }
   async connectorStatus() { return this.core.connectorStatus(TID); }
+  _users(op, body) { this._net(); const r = usersOp(this.userKeys, TID, 'demo-user', op, body); if (op !== 'users.list') this._save(true); return r; }
+  async users() { return this._users('users.list'); }
+  async addUser(u) { return this._users('users.add', u); }
+  async updateUser(u) { return this._users('users.update', u); }
+  async resetUserKey(id) { return this._users('users.resetkey', { id }); }
 
   // ---------------------------------------------------------------- demo controls
   async setFlag(k, v) { this.flags[k] = v; this.sim.s.open = this.flags.tallyOn; await this._save(true); this._emit(); }
