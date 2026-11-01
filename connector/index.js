@@ -21,7 +21,7 @@ if (!fs.existsSync(cfgPath)) {
   console.error(`Missing ${cfgPath}. Copy connector/config.example.json and fill it in.`);
   process.exit(1);
 }
-const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, '')); // Notepad may add a BOM
 const near = (f) => path.resolve(path.dirname(cfgPath), f);
 // Key order: environment variable, then a key file (the Windows installer writes one that only
 // SYSTEM and Administrators can read), then the config file (least preferred).

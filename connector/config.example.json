@@ -1,11 +1,12 @@
 {
   "tallyUrl": "http://localhost:9000",
   "tallyCompany": "Exact company name as shown in TallyPrime",
-  "relayUrl": "https://your-relay.example.com",
-  "connectorKey": "Prefer the QE_CONNECTOR_KEY environment variable instead of this field",
+  "relayUrl": "https://your-project.pages.dev",
   "intervalSec": 30,
   "tallyTimeoutSec": 60,
   "conflictPolicy": "tally-wins",
   "writeCodesToTally": true,
-  "logFile": "connector.log"
+  "logFile": "connector.log",
+  "keyFile": "connector.key",
+  "logMaxMb": 5
 }

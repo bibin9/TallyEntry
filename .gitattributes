@@ -1,0 +1,2 @@
+connector/windows/*.cmd text eol=crlf
+connector/windows/*.ps1 text eol=crlf

@@ -56,13 +56,14 @@ export async function onRequest({ request, env }) {
     try { body = text ? JSON.parse(text) : {}; } catch { return json(400, { error: 'Bad JSON' }); }
   }
 
+  // Supabase accepts either the legacy service_role key (a JWT, also sent as Bearer) or a new
+  // secret key (sb_secret_..., not a JWT: send it only as apikey).
+  const key = env.SUPABASE_SERVICE_ROLE_KEY;
+  const headers = { apikey: key, 'Content-Type': 'application/json' };
+  if (key.startsWith('eyJ')) headers.Authorization = `Bearer ${key}`;
   const r = await fetch(`${env.SUPABASE_URL.replace(/\/$/, '')}/rest/v1/rpc/qe_api`, {
     method: 'POST',
-    headers: {
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify({ p_token_hash: await sha256(token), p_op: op, p_body: body }),
   });
   const data = await r.json().catch(() => null);
