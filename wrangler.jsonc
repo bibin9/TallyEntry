@@ -10,5 +10,9 @@
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"]
   },
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  // Keep variables set in the dashboard when deploying from GitHub.
+  "keep_vars": true,
+  // Needed by "npx wrangler preview", which Cloudflare runs for pull request branches.
+  "previews": {}
 }
