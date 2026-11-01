@@ -1,6 +1,5 @@
-// Local stand-in for Cloudflare Pages + Supabase, for testing the production code path:
-//   * serves app/ like Cloudflare Pages
-//   * runs functions/api/[[path]].js for /api/*
+// Local stand-in for Cloudflare + Supabase, for testing the production code path:
+//   * runs the Worker entry (worker/index.js): /api/* to the API, the rest to app/ via an ASSETS stub
 //   * answers /rest/v1/rpc/qe_api like Supabase's PostgREST, using a real Postgres
 //   QE_PG_URL=... node tests/cf-local.mjs --port 8790
 import http from 'node:http';
@@ -8,14 +7,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { onRequest } from '../functions/api/[[path]].js';
+import worker from '../worker/index.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.argv[process.argv.indexOf('--port') + 1] || 8790);
 const pool = new pg.Pool({ connectionString: process.env.QE_PG_URL });
 const SERVICE_KEY = 'local-service-key';
-const env = { SUPABASE_URL: `http://localhost:${PORT}`, SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY };
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.webmanifest': 'application/manifest+json', '.png': 'image/png' };
+const ASSETS = { // like Cloudflare's static assets binding
+  async fetch(request) {
+    const p = new URL(request.url).pathname;
+    const f = path.join(root, 'app', p === '/' ? 'index.html' : p.slice(1));
+    if (!f.startsWith(path.join(root, 'app')) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) return new Response(null, { status: 404 });
+    return new Response(fs.readFileSync(f), { headers: { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream' } });
+  },
+};
+const env = { SUPABASE_URL: `http://localhost:${PORT}`, SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY, ASSETS };
 
 http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -28,13 +35,7 @@ http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(r.rows[0].r));
     } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ code: e.code, message: e.message })); }
   }
-  if (url.pathname.startsWith('/api/')) {
-    const request = new Request(url, { method: req.method, headers: req.headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : raw });
-    const r = await onRequest({ request, env });
-    res.writeHead(r.status, Object.fromEntries(r.headers)); return res.end(await r.text());
-  }
-  let p = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-  const f = path.join(root, 'app', p);
-  if (!f.startsWith(path.join(root, 'app')) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); return res.end(); }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(f)] || 'application/octet-stream' }); fs.createReadStream(f).pipe(res);
+  const request = new Request(url, { method: req.method, headers: req.headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : raw });
+  const r = await worker.fetch(request, env);
+  res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(Buffer.from(await r.arrayBuffer()));
 }).listen(PORT, () => console.log(`cf-local on http://localhost:${PORT}`));
