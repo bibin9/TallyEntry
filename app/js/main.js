@@ -158,7 +158,7 @@ VIEWS.home = async () => {
       <div><div class="lab">Orders</div><div class="val">${money(sum('so'), cur, 0)}</div></div></div></div>
     <div class="card"><div class="sec">Sync with Tally</div>
       <div class="counts">${['pending', 'sent', 'synced', 'failed', 'conflict'].map((k) => `<button class="cnt c-${k}" data-go="list/${k}"><b>${c[k] || 0}</b>${STATUS[k].label}</button>`).join('')}</div>
-      <p class="muted">Last sync ${ago(S.sync.lastSync)}${S.sync.lastError ? ` · <span class="err">${esc(S.sync.lastError)}</span>` : ''}${!navigator.onLine || S.sync.offline ? ' · You are offline. Work is saved on this device.' : ''}</p>
+      <p class="muted">Last sync ${ago(S.sync.lastSync)}${S.sync.lastError ? ` · <span class="err">${esc(S.sync.lastError)}</span>` : ''}${isOffline() ? ' · You are offline. Work is saved on this device.' : ''}</p>
       <button class="btn full" data-act="syncnow">${S.sync.running ? 'Syncing…' : 'Sync now'}</button></div>
     <div class="sec">Recent</div><div class="card list">${S.txns.slice(0, 6).map(txnRow).join('') || '<p class="muted">No transactions yet.</p>'}</div>
   </main>`;
@@ -220,7 +220,7 @@ function formHtml() {
         <div><label>Rate</label><input inputmode="decimal" data-l="rate" data-i="${i}" value="${esc(l.rate)}" ${S.settings.allowRateEdit ? '' : 'readonly'}></div>
         <div><label>Disc %</label><input inputmode="decimal" data-l="discPct" data-i="${i}" value="${esc(l.discPct || '')}"></div>
         <div><label>${esc(tax.taxLabel)}</label><select data-l="taxCode" data-i="${i}">${tax.rates.map((r) => `<option value="${esc(r.code)}" ${r.code === l.taxCode ? 'selected' : ''} title="${esc(r.label)}">${esc(r.code)} ${esc(r.rate)}%</option>`).join('')}</select></div></div>
-        <div class="lt">${esc(tax.taxLabel)} ${money(l.tax, cur)} · <b>${money(l.amount, cur)}</b></div></div>`;
+        <div class="lt">${lineTotalHtml(l, cur)}</div></div>`;
     }).join('') + `<button class="btn ghost full" data-act="additem">+ Add item</button>
       <div class="totals"><div><span>Before ${esc(tax.taxLabel)}</span><span id="t-taxable">${money(c.taxable, cur)}</span></div>
       <div><span>${esc(tax.taxLabel)}</span><span id="t-tax">${money(c.tax, cur)}</span></div>
@@ -240,14 +240,37 @@ function formHtml() {
     ${t.note ? `<div class="card warn small">${esc(t.note)}</div>` : ''}
     ${editing && d.syncedVersion ? `<div class="card info small">Already in Tally. Saving will update the same Tally voucher at the next sync.</div>` : ''}
     <div class="card">${body}</div><div id="formerr" class="err"></div>
-    <div class="savebar"><button class="btn full" data-act="save">Save${navigator.onLine ? '' : ' (offline)'}</button></div></main>`;
+    <div class="savebar"><button class="btn full" data-act="save">Save${isOffline() ? ' (offline)' : ''}</button></div></main>`;
+}
+
+/** True when this phone has no internet, real or simulated in the demo. */
+function isOffline() {
+  return !navigator.onLine || !!S.sync?.offline || (S.api?.flags ? S.api.flags.internet === false : false);
+}
+
+/** A problem with one item line, worded for the salesperson, or null. */
+function lineProblem(l) {
+  const num = (v) => (v === '' || v == null ? NaN : Number(v));
+  const qty = num(l.qty), rate = num(l.rate), disc = l.discPct === '' || l.discPct == null ? 0 : Number(l.discPct);
+  if (Number.isNaN(qty) || l.qty === '') return 'Enter a quantity.';
+  if (!(qty > 0)) return 'Quantity must be more than zero.';
+  if (Number.isNaN(rate)) return 'Enter a rate (0 or more).';
+  if (rate < 0) return 'Rate cannot be negative. Enter 0 or more.';
+  if (Number.isNaN(disc) || disc < 0 || disc > 100) return 'Discount must be between 0 and 100%.';
+  return null;
+}
+
+function lineTotalHtml(l, cur) {
+  const p = lineProblem(l);
+  return p ? `<span class="err">${esc(p)}</span>` : `${esc(S.settings.tax.taxLabel)} ${money(l.tax, cur)} · <b>${money(l.amount, cur)}</b>`;
 }
 
 function updateTotals() {
   const c = calcDoc(S.draft.lines, S.settings.tax), cur = S.settings.tax.currency;
   if (!$('#t-total')) return;
-  $('#t-taxable').textContent = money(c.taxable, cur); $('#t-tax').textContent = money(c.tax, cur); $('#t-total').textContent = money(c.total, cur);
-  c.lines.forEach((l, i) => { const el = $(`[data-line="${i}"] .lt`); if (el) el.innerHTML = `${esc(S.settings.tax.taxLabel)} ${money(l.tax, cur)} · <b>${money(l.amount, cur)}</b>`; });
+  const bad = S.draft.lines.some(lineProblem);
+  $('#t-taxable').textContent = bad ? '–' : money(c.taxable, cur); $('#t-tax').textContent = bad ? '–' : money(c.tax, cur); $('#t-total').textContent = bad ? '–' : money(c.total, cur);
+  c.lines.forEach((l, i) => { const el = $(`[data-line="${i}"] .lt`); if (el) el.innerHTML = lineTotalHtml(l, cur); });
 }
 
 function validate(d) {
@@ -256,10 +279,9 @@ function validate(d) {
   if (!d.partyCode || !S.ledgerByCode.get(d.partyCode)) return `Choose a ${t.party}.`;
   if (t.kind === 'items') {
     if (!d.lines.length) return 'Add at least one item.';
-    for (const l of d.lines) {
-      if (!(Number(l.qty) > 0)) return 'Every item needs a quantity above zero.';
-      if (!(Number(l.rate) >= 0) || l.rate === '') return 'Every item needs a rate.';
-      if (Number(l.discPct) < 0 || Number(l.discPct) > 100) return 'Discount must be between 0 and 100%.';
+    for (const [i, l] of d.lines.entries()) {
+      const p = lineProblem(l);
+      if (p) return d.lines.length > 1 ? `Item ${i + 1}: ${p}` : p;
     }
   } else {
     if (!(Number(d.amount) > 0)) return 'Enter the amount received.';
@@ -289,7 +311,7 @@ async function saveDraft() {
   const saved = await S.sync.saveTransaction(data);
   S.draft = null;
   await loadTxns();
-  toast(navigator.onLine ? 'Saved. Sending to Tally…' : 'Saved on this device. It will sync when you are online.');
+  toast(isOffline() ? 'Saved on this device. It will send when you are back online.' : 'Saved. Sending to Tally…');
   go('detail/' + saved.id);
 }
 
@@ -613,7 +635,7 @@ document.addEventListener('click', async (e) => {
   if (!a || a.matches('input[type=checkbox]')) return;
   const act = a.dataset.act;
   try {
-    if (act === 'syncnow') { const r = await S.sync.syncNow({ manual: true }); toast(r?.error ? (navigator.onLine ? 'Sync problem: ' + r.error : 'You are offline. Everything is saved on this device.') : 'Synced with the server'); await loadMasters(); render(true); }
+    if (act === 'syncnow') { const r = await S.sync.syncNow({ manual: true }); toast(r?.error ? (isOffline() ? 'You are offline. Everything is saved on this device.' : 'Sync problem: ' + r.error) : 'Synced with the server'); await loadMasters(); render(true); }
     else if (act === 'pickparty') openPicker(TYPES[S.draft.type].party, (code) => { S.draft.partyCode = code; render(true); });
     else if (act === 'additem') openPicker('item', (code) => {
       const it = S.itemByCode.get(code);
