@@ -121,6 +121,33 @@ export function scenarios(test, makeBackend) {
     assert.equal(s.status, 'synced'); assert.equal(s.syncedVersion, 2); assert.equal(Number(s.tally.masterId), masterId);
   });
 
+  test('cancel: a synced entry cancelled in the app is cancelled in Tally, keeping the same voucher and number', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    const x = inv(ctx);
+    await ctx.device.push([x]); await ctx.conn.runOnce();
+    const { masterId, number } = ctx.sim.s.vouchers[0];
+    await ctx.device.push([{ ...x, version: 2, cancelled: true, cancelReason: 'wrong customer' }]);
+    await ctx.conn.runOnce();
+    assert.equal(ctx.sim.s.vouchers.length, 1, 'no new voucher');
+    const v = ctx.sim.s.vouchers[0];
+    assert.equal(v.masterId, masterId); assert.equal(v.number, number);
+    assert.equal(v.cancelled, true); assert.equal(v.amount, 0);
+    assert.match(v.narration, /wrong customer/);
+    const s = await status(ctx, x.id);
+    assert.equal(s.status, 'synced'); assert.equal(s.syncedVersion, 2);
+    await ctx.conn.runOnce();
+    assert.equal(ctx.sim.s.vouchers.length, 1, 'a later sync does nothing more');
+  });
+
+  test('cancel: an entry cancelled before it reached Tally never creates a voucher', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    const x = inv(ctx);
+    await ctx.device.push([{ ...x, version: 2, cancelled: true }]);
+    await ctx.conn.runOnce();
+    assert.equal(ctx.sim.s.vouchers.length, 0);
+    assert.equal((await status(ctx, x.id)).status, 'synced');
+  });
+
   test('conflict: a voucher changed in Tally waits for the office decision', async (t) => {
     const ctx = await setup(); t.after(ctx.cleanup);
     const x = inv(ctx);

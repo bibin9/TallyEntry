@@ -204,6 +204,25 @@ const itemCount = await page.textContent('#pcount');
 const worst = Math.max(...timings.map((t) => t.searchMs));
 check(10, 'Customer and item search stays fast with 5,000 customers and 10,000 items', worst < 100, `worst search ${worst.toFixed(1)} ms; ${countTxt.split('·')[0].trim()} customers; ${itemCount.split('·')[0].trim()} items`);
 
+// ---------------- Cancel entry: the same Tally voucher is cancelled, number kept
+const dbPre = await dayBook();
+const salesNo = dbPre.find((r) => r[1] === 'Sales')?.[2];
+await page.goto(BASE + '/#detail/' + invId);
+await page.waitForSelector('[data-act="cancelentry"]');
+page.once('dialog', (d) => d.accept('Entered by mistake'));
+await page.click('[data-act="cancelentry"]');
+await page.waitForSelector('.cancelnote');
+await page.goto(BASE + '/#list');
+await page.waitForFunction(() => [...document.querySelectorAll('main .badge.b-cancelled')].some((b) => b.textContent === 'Cancelled'), null, { timeout: 30000 }).catch(async (e) => { await shot('xx-cancel-fail'); console.log(await page.evaluate(() => document.querySelector('main')?.innerText)); throw e; });
+await page.goto(BASE + '/#detail/' + invId);
+await page.waitForSelector('.cancelnote');
+const noEdit = (await page.$('[data-act="edit"], [data-go^="edit"]')) === null;
+await shot('10-cancelled-invoice');
+const db5 = await dayBook();
+const cxRow = db5.find((r) => r[1] === 'Sales');
+await shot('11-daybook-cancelled');
+check('C', 'Cancel entry cancels the same Tally voucher and keeps its number', db5.length === dbPre.length && cxRow?.[2] === salesNo && /Cancelled/.test(cxRow?.[3] || '') && Number(cxRow?.[4]) === 0 && noEdit, `voucher ${cxRow?.[2]} now ${cxRow?.[4]}; vouchers ${db5.length}`);
+
 check('-', 'No JavaScript errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 fs.writeFileSync(`${SHOTS}/results.json`, JSON.stringify({ base: BASE, at: new Date().toISOString(), results, timings }, null, 2));
 await browser.close();

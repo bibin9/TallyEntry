@@ -169,7 +169,7 @@ export class TallySim {
 
   _import(root) {
     const msg = deep(root, 'TALLYMESSAGE');
-    const r = { created: 0, altered: 0, errors: 0, lastVchId: 0, lastMid: 0, lineErrors: [] };
+    const r = { created: 0, altered: 0, cancelled: 0, errors: 0, lastVchId: 0, lastMid: 0, lineErrors: [] };
     for (const n of msg ? msg.children : []) {
       const tag = bare(n.name);
       try {
@@ -177,7 +177,7 @@ export class TallySim {
         else if (tag === 'LEDGER' || tag === 'STOCKITEM') this._importMaster(tag, n, r);
       } catch (e) { r.errors++; r.lineErrors.push(e.message); }
     }
-    return `<RESPONSE><CREATED>${r.created}</CREATED><ALTERED>${r.altered}</ALTERED><DELETED>0</DELETED><LASTVCHID>${r.lastVchId}</LASTVCHID><LASTMID>${r.lastMid}</LASTMID><COMBINED>0</COMBINED><IGNORED>0</IGNORED><ERRORS>${r.errors}</ERRORS><CANCELLED>0</CANCELLED><EXCEPTIONS>0</EXCEPTIONS>${r.lineErrors.map((e) => `<LINEERROR>${esc(e)}</LINEERROR>`).join('')}</RESPONSE>`;
+    return `<RESPONSE><CREATED>${r.created}</CREATED><ALTERED>${r.altered}</ALTERED><DELETED>0</DELETED><LASTVCHID>${r.lastVchId}</LASTVCHID><LASTMID>${r.lastMid}</LASTMID><COMBINED>0</COMBINED><IGNORED>0</IGNORED><ERRORS>${r.errors}</ERRORS><CANCELLED>${r.cancelled}</CANCELLED><EXCEPTIONS>0</EXCEPTIONS>${r.lineErrors.map((e) => `<LINEERROR>${esc(e)}</LINEERROR>`).join('')}</RESPONSE>`;
   }
 
   _importMaster(tag, n, r) {
@@ -193,6 +193,15 @@ export class TallySim {
 
   _importVoucher(n, r) {
     const action = (n.attrs.ACTION || 'Create').toLowerCase();
+    if (action === 'cancel') {
+      const tagName = (n.attrs.TAGNAME || '').toUpperCase();
+      const v = tagName === 'MASTERID' ? this.s.vouchers.find((x) => x.masterId === Number(n.attrs.TAGVALUE)) : null;
+      if (!v) throw new Error('Voucher to cancel not found');
+      // Like Tally: number and date stay, amounts go to zero, the voucher is marked cancelled.
+      Object.assign(v, { cancelled: true, amount: 0, lines: [], narration: childText(n, 'NARRATION') || v.narration, alterId: this._alter() });
+      r.cancelled++; r.lastVchId = v.masterId;
+      return;
+    }
     const vchType = n.attrs.VCHTYPE || childText(n, 'VOUCHERTYPENAME');
     const party = childText(n, 'PARTYLEDGERNAME');
     const ledgerNames = deepAll(n, 'LEDGERNAME').map(text);
