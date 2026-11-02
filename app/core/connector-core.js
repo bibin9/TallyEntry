@@ -61,7 +61,9 @@ export class Connector {
   async _fetchChanged(kind, since) {
     const req = kind === 'ledgers' ? TX.ledgersRequest(this.company, since) : TX.itemsRequest(this.company, since);
     const raw = TX.parseCollection(await this._tally(req), kind === 'ledgers' ? 'LEDGER' : 'STOCKITEM');
-    return raw.map(kind === 'ledgers' ? TX.ledgerFromTally : TX.itemFromTally);
+    // A real TallyPrime can return an empty <LEDGER/> or <STOCKITEM/> element (no GUID, no name),
+    // for example when nothing matches the filter. Skip anything that is not a real master.
+    return raw.map(kind === 'ledgers' ? TX.ledgerFromTally : TX.itemFromTally).filter((m) => m.tallyGuid && m.name);
   }
 
   async syncMasters() {
@@ -81,7 +83,7 @@ export class Connector {
           const prefix = kind === 'items' ? CODE_PREFIX.item : CODE_PREFIX[m.role] || 'L';
           const code = this._nextCode(prefix, existing);
           const res = TX.parseImportResponse(await this._tally(TX.setMasterCodeRequest(this.company, kind === 'items' ? 'STOCKITEM' : 'LEDGER', m.name, code)));
-          if (res.errors) { this.log('warn', `Could not write code to ${m.name}: ${res.messages.join('; ')}. Using GUID.`); m.code = 'G:' + m.tallyGuid; }
+          if (res.errors || !(res.altered || res.created)) { this.log('warn', `Could not write code to ${m.name}: ${res.messages.join('; ')}. Using GUID.`); m.code = 'G:' + m.tallyGuid; }
           else { m.code = code; existing.push(code); }
         }
         // Writing codes changed those masters' AlterIDs; read them back so the next run starts clean.
