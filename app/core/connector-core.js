@@ -121,6 +121,27 @@ export class Connector {
     return { masterId: Number(String(v.MASTERID).trim()), alterId: Number(String(v.ALTERID).trim()), guid: v.GUID, voucherNo: v.VOUCHERNUMBER, count: list.length };
   }
 
+  /** Cancel in Tally an entry the app cancelled. Nothing in Tally yet (or deleted there): nothing to do. */
+  async _cancel(txn, mapping, r) {
+    let target = mapping?.masterId ? await this._findVoucher('mid', mapping.masterId) : null;
+    if (!target) target = await this._findVoucher('txn', txn.id);
+    if (!target) {
+      await this.relay.result({ ...r, ok: true, action: 'Alter', cancelled: true, masterId: mapping?.masterId || null, voucherNo: mapping?.voucherNo || txn.number });
+      this.log('info', `${txn.number}: cancelled in the app; no voucher in Tally to cancel`);
+      return { ...r, ok: true, action: 'Cancel', masterId: null };
+    }
+    const res = TX.parseImportResponse(await this._tally(TX.cancelVoucherRequest(this.company, txn, target.masterId, txn.cancelReason || '')));
+    if (res.errors || !(res.cancelled || res.altered)) {
+      const msg = res.messages.join('; ') || 'Tally did not cancel the voucher';
+      await this.relay.result({ ...r, ok: false, error: msg });
+      return { ...r, ok: false, error: msg };
+    }
+    const after = await this._findVoucher('mid', target.masterId);
+    await this.relay.result({ ...r, ok: true, action: 'Alter', cancelled: true, masterId: target.masterId, alterId: after?.alterId, guid: after?.guid || target.guid, voucherNo: after?.voucherNo || target.voucherNo });
+    this.log('info', `${txn.number} v${txn.version}: cancelled Tally voucher ${target.masterId}`);
+    return { ...r, ok: true, action: 'Cancel', masterId: target.masterId };
+  }
+
   async postPending() {
     const queue = await this.relay.queue();
     const results = [];
@@ -129,6 +150,7 @@ export class Connector {
     for (const { txn, mapping, names, force } of queue) {
       const r = { id: txn.id, version: txn.version };
       try {
+        if (txn.cancelled) { results.push(await this._cancel(txn, mapping, r)); continue; }
         if (!names.party) throw new Error(`Party code ${txn.partyCode} not found in synced masters`);
         let target = null;
         if (mapping?.masterId) {

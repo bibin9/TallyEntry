@@ -232,7 +232,7 @@ export class RelayCore {
         syncedVersion: r.version, alterIdAtSync: r.alterId, syncedAt: now(),
       };
       if (!stale) { x.status = 'synced'; x.error = null; x.force = false; x.attempts = 0; x.retryAt = null; }
-      this._log(t, { dir: 'cloud->tally', id: r.id, number: x.number, version: r.version, result: r.action === 'Alter' ? 'altered' : 'created', masterId: r.masterId });
+      this._log(t, { dir: 'cloud->tally', id: r.id, number: x.number, version: r.version, result: r.cancelled ? 'cancelled' : r.action === 'Alter' ? 'altered' : 'created', masterId: r.masterId });
     } else if (r.conflict) {
       if (!stale) { x.status = 'conflict'; x.conflict = r.conflict; }
       this._log(t, { dir: 'cloud->tally', id: r.id, number: x.number, version: r.version, result: 'conflict', message: r.conflict });

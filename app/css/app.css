@@ -93,3 +93,7 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-conten
 .card.signin details{margin-top:14px}.card.signin summary{cursor:pointer;color:var(--mute)}
 .logindet td{padding:4px 8px}
 [hidden]{display:none!important}
+
+.b-cancelled{background:#eceff3;color:#5b6478}.btn.danger{background:#fff;color:var(--red);box-shadow:inset 0 0 0 1.5px var(--red);margin-top:12px}
+.cancelnote{margin-top:8px;padding:8px 10px;border-radius:8px;background:#eceff3;color:#3a4256;font-size:13.5px}
+.paper.cancelled{opacity:.55;position:relative}.paper.cancelled::after{content:'CANCELLED';position:absolute;top:40%;left:50%;transform:translate(-50%,-50%) rotate(-18deg);font-size:44px;font-weight:800;color:var(--red);border:4px solid var(--red);padding:4px 16px;border-radius:8px;opacity:.8}

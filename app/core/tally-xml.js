@@ -160,6 +160,18 @@ export function voucherRequest(company, txn, names, map, tax, action = 'Create',
   return importEnv(company, 'Vouchers', head + body + '</VOUCHER>');
 }
 
+/**
+ * Cancel a voucher that is already in Tally. Tally keeps the voucher number with zero amounts and
+ * marks it "Cancelled", which keeps the numbering complete for VAT. The reason goes in the narration.
+ */
+export function cancelVoucherRequest(company, txn, masterId, reason = '') {
+  const t = TYPES[txn.type];
+  if (!t) throw new Error('Unknown transaction type ' + txn.type);
+  // VERIFY: cancelling by MASTERID via TAGNAME/TAGVALUE on the client's Tally release (same form as Alter).
+  return importEnv(company, 'Vouchers', `<VOUCHER DATE="${tdate(txn.date)}" TAGNAME="MASTERID" TAGVALUE="${Number(masterId)}" VCHTYPE="${esc(t.vchType)}" ACTION="Cancel">`
+    + `<NARRATION>${esc(('Cancelled in QuickEntry' + (reason ? ': ' + reason : '')).slice(0, 250))}</NARRATION></VOUCHER>`);
+}
+
 /** Parse Tally's import response: <RESPONSE><CREATED>..<LASTVCHID>..<LINEERROR>.. */
 export function parseImportResponse(xml) {
   const root = parseXml(xml);
@@ -168,7 +180,7 @@ export function parseImportResponse(xml) {
   const errors = deepAll(root, 'LINEERROR').map(text).filter(Boolean);
   return {
     created: n('CREATED'), altered: n('ALTERED'), errors: n('ERRORS') || (errors.length ? errors.length : 0),
-    exceptions: n('EXCEPTIONS'), lastVchId: n('LASTVCHID'), lastMid: n('LASTMID'), messages: errors,
+    cancelled: n('CANCELLED'), exceptions: n('EXCEPTIONS'), lastVchId: n('LASTVCHID'), lastMid: n('LASTMID'), messages: errors,
   };
 }
 

@@ -70,7 +70,7 @@ async function boot() {
   }
   // First time on this phone: start at the sign-in screen (the demo is one tap away).
   if (!(await db.meta('mode')) && !location.hash.replace('#', '')) history.replaceState(null, '', location.pathname + '#signin');
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', () => { if (!$('#sheet').hidden) closeSheet(); route(); });
   route();
   S.sync.start();
   // First run in demo mode: fetch masters and the signed-in user immediately.
@@ -128,7 +128,11 @@ function header(title, back) {
   return `<div class="bar">${back ? `<button class="back" data-go="${back}" aria-label="Back">‹</button>` : ''}<h1>${esc(title)}</h1></div>`;
 }
 
-function badge(t) { return `<span class="badge b-${t.status}" title="${esc(STATUS[t.status]?.hint || '')}">${STATUS[t.status]?.label || t.status}</span>`; }
+function badge(t) {
+  if (t.cancelled && t.status === 'synced') return '<span class="badge b-cancelled" title="Cancelled in the app and in Tally">Cancelled</span>';
+  if (t.cancelled && ['pending', 'sent'].includes(t.status)) return '<span class="badge b-cancelled" title="Cancelled in the app; cancelling in Tally">Cancelling…</span>';
+  return `<span class="badge b-${t.status}" title="${esc(STATUS[t.status]?.hint || '')}">${STATUS[t.status]?.label || t.status}</span>`;
+}
 
 function txnRow(t) {
   const ty = TYPES[t.type];
@@ -136,7 +140,7 @@ function txnRow(t) {
   const total = ty.kind === 'items' ? calcDoc(t.lines, S.settings.tax).total : Number(t.amount) || 0;
   return `<button class="row" data-go="detail/${t.id}"><span class="tag t-${t.type}">${ty.icon}</span>
     <span class="main"><span class="p">${esc(party)}</span><span class="s">${esc(t.number)} · ${fdate(t.date)}</span></span>
-    <span class="a">${money(total, S.settings.tax.currency)}<br>${badge(t)}</span></button>`;
+    <span class="a">${t.cancelled ? `<s>${money(total, S.settings.tax.currency)}</s>` : money(total, S.settings.tax.currency)}<br>${badge(t)}</span></button>`;
 }
 
 // ------------------------------------------------------------------ views
@@ -145,7 +149,7 @@ const VIEWS = {};
 VIEWS.home = async () => {
   const c = await S.sync.counts();
   const today = todayIso();
-  const tToday = S.txns.filter((t) => t.date === today);
+  const tToday = S.txns.filter((t) => t.date === today && !t.cancelled);
   const sum = (type) => tToday.filter((t) => t.type === type).reduce((s, t) => s + (TYPES[t.type].kind === 'items' ? calcDoc(t.lines, S.settings.tax).total : Number(t.amount) || 0), 0);
   const cur = S.settings.tax.currency;
   const noMasters = !S.ledgers.length;
@@ -197,6 +201,7 @@ VIEWS.edit = async () => {
   if (!S.draft || S.draft._for !== location.hash) {
     const t = await db.get('txns', S.params[0]);
     if (!t) return `${header('Not found', 'list')}<main><p>This transaction is no longer on this device.</p></main>`;
+    if (t.cancelled) return `${header(t.number, 'detail/' + t.id)}<main><p>This entry is cancelled and cannot be edited. Make a new entry instead.</p></main>`;
     S.draft = { ...structuredClone(t), _for: location.hash };
   }
   return formHtml();
@@ -357,12 +362,16 @@ VIEWS.detail = async () => {
   return `${header(t.number, 'list')}<main>
     <div class="card status s-${t.status}"><div>${badge(t)} <span class="muted">${esc(st.hint)}</span></div>
       ${t.tally?.voucherNo ? `<div class="small">Tally voucher ${esc(t.tally.voucherNo)} (ID ${esc(t.tally.masterId)}) · version ${t.syncedVersion} of ${t.version}</div>` : `<div class="small muted">Version ${t.version} · ID ${esc(t.id)}</div>`}
+      ${t.cancelled ? `<div class="cancelnote"><b>Cancelled</b>${t.cancelledBy ? ' by ' + esc(t.cancelledBy) : ''}${t.cancelledAt ? ' on ' + fdate(t.cancelledAt.slice(0, 10)) : ''}${t.cancelReason ? ': ' + esc(t.cancelReason) : ''}.
+        ${t.status === 'synced' ? (t.tally?.voucherNo ? 'The Tally voucher is cancelled too (number kept).' : 'It never reached Tally, so nothing was posted.') : 'It will be cancelled in Tally at the next sync.'}</div>` : ''}
       ${t.error ? `<div class="err">Tally said: ${esc(t.error)}</div><button class="btn sm" data-act="retry" data-id="${t.id}">Retry now</button>` : ''}
       ${t.conflict ? `<div class="err">${esc(t.conflict)}</div>${admin ? `<div class="btns"><button class="btn sm" data-act="resolve" data-choice="app" data-id="${t.id}">Overwrite Tally with this version</button><button class="btn sm ghost" data-act="resolve" data-choice="tally" data-id="${t.id}">Keep Tally's version</button></div>` : '<div class="small">Ask the office to resolve it.</div>'}` : ''}
     </div>
-    <div class="btns sticky"><button class="btn" data-act="edit" data-id="${t.id}">Edit</button><button class="btn ghost" data-act="pdf" data-id="${t.id}">PDF</button>
-      <button class="btn ghost" data-act="print" data-id="${t.id}">Print</button><button class="btn wa" data-act="share" data-id="${t.id}">WhatsApp / Share</button></div>
-    <div class="paper">${docHtml(m)}</div>
+    ${t.cancelled ? '' : `<div class="btns sticky"><button class="btn" data-act="edit" data-id="${t.id}">Edit</button><button class="btn ghost" data-act="pdf" data-id="${t.id}">PDF</button>
+      <button class="btn ghost" data-act="print" data-id="${t.id}">Print</button><button class="btn wa" data-act="share" data-id="${t.id}">WhatsApp / Share</button></div>`}
+    <div class="paper${t.cancelled ? ' cancelled' : ''}">${docHtml(m)}</div>
+    ${t.cancelled ? '' : `<button class="btn danger full" data-act="cancelentry" data-id="${t.id}">Cancel this entry</button>
+    <p class="small muted center">Cancels it here and in Tally. The number is kept, so numbering stays complete for VAT.</p>`}
     ${S.mode === 'demo' && t.tally?.masterId ? `<div class="card demo small"><b>Demo:</b> <button class="link" data-act="demo-edit-tally" data-id="${t.id}">Simulate an accountant editing this voucher in Tally</button> (then edit it here to see a conflict).</div>` : ''}
   </main>`;
 };
@@ -484,7 +493,7 @@ VIEWS.daybook = async () => {
   const v = S.api.dayBook();
   return `${header('Simulated Tally day book', 'more')}<main><div class="card warn small">This is the simulator's data, not your Tally.</div>
     <div class="card"><table class="tbl"><tr><th>ID</th><th>Type</th><th>No.</th><th>Party</th><th class="r">Amount</th><th>Alter</th></tr>
-    ${v.map((x) => `<tr><td>${x.masterId}</td><td>${esc(x.vchType)}</td><td>${esc(x.number)}</td><td>${esc(x.party)}</td><td class="r">${x.amount.toFixed(2)}</td><td>${x.alterId}</td></tr>`).join('')}</table>
+    ${v.map((x) => `<tr><td>${x.masterId}</td><td>${esc(x.vchType)}</td><td>${esc(x.number)}</td><td>${esc(x.party)}${x.cancelled ? ' <span class="badge b-cancelled">Cancelled</span>' : ''}</td><td class="r">${x.amount.toFixed(2)}</td><td>${x.alterId}</td></tr>`).join('')}</table>
     <p class="small muted">${v.length} vouchers. Each app transaction appears once, however many times it is synced.</p></div></main>`;
 };
 
@@ -647,6 +656,16 @@ document.addEventListener('click', async (e) => {
     else if (act === 'delline') { S.draft.lines.splice(Number(a.dataset.i), 1); render(true); }
     else if (act === 'save') await saveDraft();
     else if (act === 'edit') { S.draft = null; go('edit/' + a.dataset.id); }
+    else if (act === 'cancelentry') {
+      const t = await db.get('txns', a.dataset.id);
+      if (!t || t.cancelled) return;
+      const reason = prompt(`Cancel ${t.number}?\n\nIt is cancelled here and in Tally (the number is kept). This cannot be undone.\n\nReason (optional):`, '');
+      if (reason === null) return;
+      await S.sync.saveTransaction({ id: t.id, cancelled: true, cancelReason: reason.trim().slice(0, 200), cancelledAt: new Date().toISOString(), cancelledBy: S.me?.name || '' });
+      await loadTxns();
+      toast(isOffline() ? `${t.number} cancelled on this device. Tally is updated when you are back online.` : `${t.number} cancelled. Cancelling it in Tally…`);
+      render();
+    }
     else if (['pdf', 'print', 'share'].includes(act)) {
       const t = await db.get('txns', a.dataset.id);
       const m = docModel(t, ctx());
