@@ -108,7 +108,7 @@ async function renderChrome() {
     : '';
   const signedOut = S.mode === 'live' && /sign in again/i.test(S.sync.lastError || '');
   if (signedOut) $('#modebar').innerHTML = `<b>Signed out</b> Your password or key was changed. <a href="#signin">Sign in again</a>`;
-  $('#modebar').hidden = S.mode !== 'demo' && !signedOut;
+  $('#modebar').hidden = (S.mode !== 'demo' && !signedOut) || S.view === 'signin';
   if (['home', 'list', 'detail', 'sync'].includes(S.view) && !document.activeElement?.matches('input,select,textarea')) render(true);
 }
 
@@ -568,6 +568,8 @@ async function render(soft) {
   if (seq !== renderSeq) return;
   $('#view').innerHTML = html;
   linkLabels($('#view'));
+  $('nav.tabs').hidden = S.view === 'signin';
+  if (S.view === 'signin') $('#modebar').hidden = true;
   document.querySelectorAll('nav.tabs a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + S.view));
   if (soft) window.scrollTo(0, scroll);
   else window.scrollTo(0, 0);

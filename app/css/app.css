@@ -90,3 +90,4 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-conten
 .signin-page .brand{text-align:center;margin:28px 0 12px}.signin-page .brand h1{margin:0;color:var(--blue,#1a56c4);font-size:28px}
 .card.signin details{margin-top:14px}.card.signin summary{cursor:pointer;color:var(--mute)}
 .logindet td{padding:4px 8px}
+[hidden]{display:none!important}
