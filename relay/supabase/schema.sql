@@ -138,24 +138,24 @@ alter table sync_log      enable row level security;
 
 -- ---------------------------------------------------------------------------------------
 -- Helpers
-create or replace function qe_next_seq(p_tid text) returns bigint language sql as $$
+create or replace function qe_next_seq(p_tid text) returns bigint language sql set search_path = public as $$
   update tenants set seq = seq + 1 where id = p_tid returning seq;
 $$;
 
 create or replace function qe_log(p_tid text, p_dir text, p_txn text, p_number text, p_version int, p_result text, p_message text default null, p_counts jsonb default null)
-returns void language sql as $$
+returns void language sql set search_path = public as $$
   insert into sync_log (tenant_id, dir, txn_id, number, version, result, message, counts)
   values (p_tid, p_dir, p_txn, p_number, p_version, p_result, p_message, p_counts);
 $$;
 
-create or replace function qe_txn_total(d jsonb) returns numeric language sql immutable as $$
+create or replace function qe_txn_total(d jsonb) returns numeric language sql immutable set search_path = public as $$
   select case when d->>'type' = 'rc' then coalesce((d->>'amount')::numeric, 0)
     else coalesce((select sum(coalesce((l->>'qty')::numeric,0) * coalesce((l->>'rate')::numeric,0) * (1 - coalesce((l->>'discPct')::numeric,0)/100))
                    from jsonb_array_elements(coalesce(d->'lines','[]'::jsonb)) l), 0) end;  -- before tax; for reporting only
 $$;
 
 -- Upsert one master; returns 'added' | 'updated' | 'unchanged'
-create or replace function qe_upsert_master(p_tid text, p_kind text, m jsonb) returns text language plpgsql as $$
+create or replace function qe_upsert_master(p_tid text, p_kind text, m jsonb) returns text language plpgsql set search_path = public as $$
 declare
   v_code text := m->>'code';
   v_old jsonb; v_old_code text; v_seq bigint;
@@ -196,10 +196,10 @@ begin
 end $$;
 
 -- New random key (about 240 bits, URL-safe) and its SHA-256 hash, as the app sends it.
-create or replace function qe_new_key() returns text language sql volatile as $$
+create or replace function qe_new_key() returns text language sql volatile set search_path = public as $$
   select rtrim(translate(encode(decode(replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', ''), 'hex'), 'base64'), '+/', '-_'), '=')
 $$;
-create or replace function qe_hash(p_key text) returns text language sql immutable as $$
+create or replace function qe_hash(p_key text) returns text language sql immutable set search_path = public as $$
   select encode(sha256(convert_to(p_key, 'UTF8')), 'hex')
 $$;
 
@@ -357,7 +357,11 @@ begin
       values (v_tid, x->>'id', x->>'type', x->>'number', (x->>'date')::date, x->>'partyCode', qe_txn_total(x), (x->>'version')::int, x, 'queued', u.id)
       on conflict (tenant_id, id) do update set type = excluded.type, number = excluded.number, txn_date = excluded.txn_date,
         party_code = excluded.party_code, total = excluded.total, version = excluded.version, data = excluded.data,
-        status = 'queued', error = null, conflict = null, received_at = now();
+        status = 'queued', error = null, conflict = null, received_at = now()
+        where txns.version < excluded.version;  -- two copies of one push arriving at the same instant: the second is a duplicate
+      if not found then
+        res := res || jsonb_build_object('id', x->>'id', 'accepted', false, 'duplicate', true, 'version', (x->>'version')::int); continue;
+      end if;
       delete from txn_lines where tenant_id = v_tid and txn_id = x->>'id';
       insert into txn_lines (tenant_id, txn_id, line_no, item_code, qty, rate, disc_pct, tax_code)
       select v_tid, x->>'id', o.n, o.l->>'itemCode', (o.l->>'qty')::numeric, (o.l->>'rate')::numeric, coalesce((o.l->>'discPct')::numeric, 0), o.l->>'taxCode'

@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { RelayCore } from '../app/core/relay-core.js';
 import { handleApi } from '../app/core/relay-api.js';
+import { parseHeaders, headersFor } from '../server/headers-file.js';
 import { defaultSettings } from '../app/core/defaults.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -78,6 +79,7 @@ for (const [tid, t] of Object.entries(config.tenants)) {
 }
 persist();
 
+const HEADER_RULES = fs.existsSync(path.join(APP, '_headers')) ? parseHeaders(fs.readFileSync(path.join(APP, '_headers'), 'utf8')) : [];
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
 const server = http.createServer(async (req, res) => {
@@ -110,7 +112,8 @@ const server = http.createServer(async (req, res) => {
   if (!p) p = 'index.html';
   const file = path.join(APP, p);
   if (!file.startsWith(APP) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); return res.end('Not found'); }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': p === 'sw.js' ? 'no-cache' : 'no-cache' });
+  // Same headers as Cloudflare, from app/_headers.
+  res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ...headersFor(HEADER_RULES, url.pathname) });
   fs.createReadStream(file).pipe(res);
 });
 
