@@ -22,9 +22,10 @@ function blankTenant(id, name) {
 /** A retention setting in days: whole number, lo..3650, or the default if it is not a number. */
 const days = (v, d, lo) => Math.min(Math.max(v !== null && v !== '' && Number.isFinite(+v) ? Math.trunc(+v) : d, lo), 3650);
 
+const BALANCE_FIELDS = { ledgers: ['balance', 'overdue', 'overdueDays'], items: ['stock'] };
 const MASTER_FIELDS = {
-  ledgers: ['name', 'parent', 'role', 'phone', 'email', 'trn', 'address', 'tallyGuid', 'active'],
-  items: ['name', 'group', 'unit', 'partNo', 'rate', 'cost', 'taxCode', 'stock', 'tallyGuid', 'active'],
+  ledgers: ['name', 'parent', 'role', 'phone', 'email', 'trn', 'address', 'balance', 'creditLimit', 'creditDays', 'priceLevel', 'tallyGuid', 'active'],
+  items: ['name', 'group', 'unit', 'partNo', 'rate', 'cost', 'taxCode', 'stock', 'priceLevels', 'tallyGuid', 'active'],
 };
 
 export class RelayCore {
@@ -188,6 +189,24 @@ export class RelayCore {
     this._log(t, { dir: 'tally->cloud', result: 'masters', counts });
     await this._save();
     return counts;
+  }
+
+  /** Merge refreshed balances, overdue amounts and stock into existing masters. Only these fields. */
+  async connectorPushBalances(tid, { ledgers = [], items = [] }) {
+    const t = this.tenant(tid);
+    const out = { ledgers: 0, items: 0 };
+    for (const [kind, list, fields] of [['ledgers', ledgers, BALANCE_FIELDS.ledgers], ['items', items, BALANCE_FIELDS.items]]) {
+      for (const p of list) {
+        const cur = t[kind][p?.code];
+        if (!cur) continue;
+        const patch = Object.fromEntries(fields.filter((f) => typeof p[f] === 'number' && Number.isFinite(p[f])).map((f) => [f, p[f]]));
+        if (!Object.keys(patch).some((f) => cur[f] !== patch[f])) continue;
+        Object.assign(cur, patch, { seq: ++t.seq, updatedAt: now() });
+        out[kind]++;
+      }
+    }
+    if (out.ledgers || out.items) { this._log(t, { dir: 'tally->cloud', result: `balances (${out.ledgers} customers/ledgers, ${out.items} items)` }); await this._save(); }
+    return out;
   }
 
   /** Mark masters missing from Tally's full key list as inactive. */

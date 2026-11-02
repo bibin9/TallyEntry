@@ -28,6 +28,7 @@ const ROUTES = {
   'POST /api/connector/hello': 'connector.hello',
   'POST /api/connector/state': 'connector.state',
   'POST /api/connector/masters': 'connector.masters',
+  'POST /api/connector/balances': 'connector.balances',
   'POST /api/connector/reconcile': 'connector.reconcile',
   'GET /api/connector/queue': 'connector.queue',
   'POST /api/connector/result': 'connector.result',

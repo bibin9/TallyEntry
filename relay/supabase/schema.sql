@@ -412,7 +412,7 @@ returns jsonb language plpgsql security definer set search_path = public as $$
 declare
   u app_users; t tenants; v_tid text; x jsonb; r jsonb; res jsonb := '[]'::jsonb;
   cur txns; m sync_mappings; v_ver int; v_kind text; v_res text; v_counts jsonb; v_n int; v_since bigint;
-  v_stale boolean; v_names jsonb; v_items jsonb;
+  v_stale boolean; v_names jsonb; v_items jsonb; v_c int; v_li int; v_patch jsonb;
 begin
   if p_op = 'login' then
     if p_token_hash is not null then raise exception 'Not allowed' using errcode = '42501'; end if;
@@ -585,6 +585,30 @@ begin
     end loop;
     perform qe_log(v_tid, 'tally->cloud', null, null, null, 'masters', null, v_counts);
     return v_counts;
+
+  elsif p_op = 'connector.balances' then
+    -- Merge refreshed balance, overdue and stock numbers into existing masters (only these fields).
+    v_li := 0; v_n := 0;
+    for x in select * from jsonb_array_elements(coalesce(p_body->'ledgers', '[]'::jsonb)) loop
+      v_patch := jsonb_strip_nulls(jsonb_build_object(
+        'balance', case when jsonb_typeof(x->'balance') = 'number' then x->'balance' end,
+        'overdue', case when jsonb_typeof(x->'overdue') = 'number' then x->'overdue' end,
+        'overdueDays', case when jsonb_typeof(x->'overdueDays') = 'number' then x->'overdueDays' end));
+      update ledgers set data = data || v_patch, seq = qe_next_seq(v_tid), updated_at = now()
+        where tenant_id = v_tid and code = x->>'code' and data || v_patch <> data;
+      get diagnostics v_c = row_count; v_li := v_li + v_c;
+    end loop;
+    for x in select * from jsonb_array_elements(coalesce(p_body->'items', '[]'::jsonb)) loop
+      continue when jsonb_typeof(x->'stock') is distinct from 'number';
+      v_patch := jsonb_build_object('stock', x->'stock');
+      update items set data = data || v_patch, seq = qe_next_seq(v_tid), updated_at = now()
+        where tenant_id = v_tid and code = x->>'code' and data || v_patch <> data;
+      get diagnostics v_c = row_count; v_n := v_n + v_c;
+    end loop;
+    if v_li + v_n > 0 then
+      perform qe_log(v_tid, 'tally->cloud', null, null, null, 'balances (' || v_li || ' customers/ledgers, ' || v_n || ' items)');
+    end if;
+    return jsonb_build_object('ledgers', v_li, 'items', v_n);
 
   elsif p_op = 'connector.reconcile' then
     v_n := 0;

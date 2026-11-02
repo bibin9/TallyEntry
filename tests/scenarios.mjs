@@ -199,4 +199,69 @@ export function scenarios(test, makeBackend) {
     const delta = await ctx.device.masters(ctx.m.cursor);
     assert.equal(delta.ledgers.find((l) => l.code === code).active, false);
   });
+
+  test('balances, overdue, credit terms and price levels come from Tally', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    const c1 = ctx.m.ledgers.find((l) => l.name === 'Al Madina Supermarket');
+    assert.equal(c1.balance, 4700);
+    assert.equal(c1.creditLimit, 20000);
+    assert.equal(c1.creditDays, 30);
+    assert.equal(c1.overdue, 3200);          // OB-101 is 45 days old on 30-day terms
+    assert.equal(c1.overdueDays, 15);
+    const c2 = ctx.m.ledgers.find((l) => l.name === 'Gulf Star Electronics');
+    assert.equal(c2.priceLevel, 'Wholesale');
+    assert.equal(c2.overdue, 0);
+    const led = ctx.m.items.find((i) => i.name === 'LED Panel Light 18W');
+    assert.deepEqual(led.priceLevels, { Wholesale: { rate: 37.8, disc: 0 } });
+  });
+
+  test('a sale or receipt refreshes balance and stock on the next sync, without a master edit', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    const cust = ctx.m.ledgers.find((l) => l.name === 'Al Madina Supermarket');
+    const item = ctx.m.items[0];
+    const stock0 = item.stock;
+    const x = inv(ctx, { partyCode: cust.code, lines: [{ itemCode: item.code, qty: 10, rate: 100, discPct: 0, taxCode: 'SR' }] });
+    await ctx.device.push([x]);
+    await ctx.conn.runOnce();   // posts the invoice
+    await ctx.conn.runOnce();   // next cycle reads the new balance and stock
+    let delta = await ctx.device.masters(ctx.m.cursor);
+    assert.equal(delta.ledgers.find((l) => l.code === cust.code).balance, 4700 + 1050);
+    assert.equal(delta.items.find((i) => i.code === item.code).stock, stock0 - 10);
+    // A receipt clears the oldest bill first, so the overdue amount goes.
+    const rc = { id: uuid(), version: 1, type: 'rc', number: 'RV-T-1', date: today, partyCode: cust.code, amount: 3200, mode: 'cash', accountCode: ctx.m.ledgers.find((l) => l.role === 'account').code };
+    await ctx.device.push([rc]);
+    await ctx.conn.runOnce(); await ctx.conn.runOnce();
+    const all = await ctx.device.masters(0);
+    const after = all.ledgers.find((l) => l.code === cust.code);
+    assert.equal(after.balance, 4700 + 1050 - 3200);
+    assert.equal(after.overdue, 0);
+    // Nothing changed in Tally: no master is sent again.
+    const before = all.cursor;
+    await ctx.conn.runOnce();
+    delta = await ctx.device.masters(before);
+    assert.equal(delta.ledgers.length + delta.items.length, 0);
+  });
+
+  test('balance refresh changes only balance fields and ignores unknown codes', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    const cust = ctx.m.ledgers.find((l) => l.role === 'customer');
+    const r = await ctx.relay.pushBalances({ ledgers: [{ code: cust.code, balance: 99, name: 'Hacked', creditLimit: 1 }, { code: 'NOPE', balance: 1 }], items: [{ code: ctx.m.items[0].code, stock: 'x' }] });
+    assert.equal(r.ledgers, 1);
+    assert.equal(r.items, 0);
+    const m = (await ctx.device.masters(0)).ledgers.find((l) => l.code === cust.code);
+    assert.equal(m.balance, 99);
+    assert.equal(m.name, cust.name);
+    assert.equal(m.creditLimit, cust.creditLimit);
+  });
+
+  test('a server without the balance refresh does not stop vouchers from posting', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    const relay = { ...ctx.relay, pushBalances: async () => { throw new Error('Unknown operation connector.balances'); } };
+    const conn = new Connector({ tally: async (x) => ctx.sim.handle(x), relay, company: ctx.sim.company });
+    const x = inv(ctx);
+    await ctx.device.push([x]);
+    const r = await conn.runOnce();
+    assert.equal(r.error, null);
+    assert.equal((await status(ctx, x.id)).status, 'synced');
+  });
 }

@@ -60,6 +60,22 @@ try {
     full.data.ledgers.length === 5000 && full.data.items.length === 10000 && again.data.ledgers.unchanged === 1000 && delta.data.ledgers.length === 0 && dl < 10000,
     { uploadMs: upload, fullDownloadMs: dl, fullDownloadMB: +(size / 1e6).toFixed(2), unchangedResync1000Ms: resync, deltaDownloadMs: deltaMs, deltaRecords: delta.data.ledgers.length + delta.data.items.length });
 
+  // Balance refresh: the connector sends every customer's balance and every item's stock once after a restart,
+  // then only what changed. Here: all 5,000 + 10,000, then 50 sales' worth of changes.
+  t0 = Date.now();
+  let bl = 0, bi = 0;
+  for (let i = 0; i < 5000; i += 1000) bl += (await req(ck, 'POST', '/api/connector/balances', { ledgers: ledgers.slice(i, i + 1000).map((l, k) => ({ code: l.code, balance: 100 + k, overdue: k % 7 ? 0 : 50, overdueDays: k % 7 ? 0 : 12 })), items: [] })).data.ledgers;
+  for (let i = 0; i < 10000; i += 1000) bi += (await req(ck, 'POST', '/api/connector/balances', { ledgers: [], items: items.slice(i, i + 1000).map((it, k) => ({ code: it.code, stock: 500 - (k % 400) })) })).data.items;
+  const balAll = Date.now() - t0;
+  t0 = Date.now();
+  const small = await req(ck, 'POST', '/api/connector/balances', { ledgers: ledgers.slice(0, 50).map((l) => ({ code: l.code, balance: 5000 })), items: items.slice(0, 120).map((it) => ({ code: it.code, stock: 1 })) });
+  const balSmall = Date.now() - t0;
+  const bdelta = await req(reps[0].key, 'GET', `/api/masters?since=${delta.data.cursor}`);
+  record('Masters', 'Balance and stock refresh: all 15,000 after a restart, then a small change reaches phones as a small download',
+    bl === 5000 && bi === 10000 && small.data.ledgers === 50 && small.data.items === 120 && bdelta.data.ledgers.length === 5000 && bdelta.data.items.length === 10000,
+    { allBalancesMs: balAll, changed170Ms: balSmall });
+  const cursorAfterBalances = bdelta.data.cursor;
+
   // ------------------------------------------------ 2. 30 phones push at once, each request sent twice (flaky network retries)
   const inv = (rep, n) => ({ id: crypto.randomUUID(), version: 1, type: 'si', number: `SI-${rep.code}-${String(n).padStart(4, '0')}`, date: new Date().toISOString().slice(0, 10), partyCode: `C${String(n % 5000).padStart(5, '0')}`,
     lines: Array.from({ length: 5 }, (_, k) => ({ itemCode: `I${String((n * 7 + k) % 10000).padStart(5, '0')}`, qty: 1 + k, rate: 10, discPct: 0, taxCode: 'SR' })) });
@@ -113,7 +129,7 @@ try {
   };
   await sustained('Sign-in check (GET /api/me), 50 users at once for 15 s', { path: '/api/me', headers: auth }, 2000);
   await sustained('Status polling of 40 invoices (POST /api/txns/status), 50 at once for 15 s', { path: '/api/txns/status', method: 'POST', headers: auth, body: JSON.stringify({ ids: sent[1].map((t) => t.id) }) }, 2000);
-  await sustained('Delta masters check (GET /api/masters?since=cursor), 50 at once for 15 s', { path: `/api/masters?since=${full.data.cursor + 1000}`, headers: auth }, 2000);
+  await sustained('Delta masters check (GET /api/masters?since=cursor), 50 at once for 15 s', { path: `/api/masters?since=${cursorAfterBalances + 1000}`, headers: auth }, 2000);
   await sustained('Wrong keys (brute force), 50 at once for 15 s: every answer is 401', { path: '/api/me', headers: { Authorization: 'Bearer ' + crypto.randomBytes(30).toString('base64url') } }, 2000, 401);
 
   // ------------------------------------------------ 5. Edits under load: new versions replace old, stale results ignored

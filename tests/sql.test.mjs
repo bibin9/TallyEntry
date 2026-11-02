@@ -21,7 +21,7 @@ if (!url) {
     return {
       relay: {
         hello: (b) => call(ck, 'connector.hello', b), saveState: (s) => call(ck, 'connector.state', s),
-        pushMasters: (b) => call(ck, 'connector.masters', b), reconcile: (kind, codes) => call(ck, 'connector.reconcile', { kind, codes }),
+        pushMasters: (b) => call(ck, 'connector.masters', b), pushBalances: (b) => call(ck, 'connector.balances', b), reconcile: (kind, codes) => call(ck, 'connector.reconcile', { kind, codes }),
         queue: () => call(ck, 'connector.queue'), result: (r) => call(ck, 'connector.result', r),
       },
       device: {

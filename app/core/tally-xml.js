@@ -21,13 +21,23 @@ export function collectionRequest(company, id, type, fetch, filterFormula) {
   );
 }
 
-const LEDGER_FETCH = ['GUID', 'MASTERID', 'ALTERID', 'NAME', 'PARENT', 'LEDGERPHONE', 'LEDGERMOBILE', 'EMAIL', 'VATTINNUMBER', 'ADDRESS', 'QECODE'];
-const ITEM_FETCH = ['GUID', 'MASTERID', 'ALTERID', 'NAME', 'PARENT', 'BASEUNITS', 'PARTNO', 'STANDARDPRICE', 'STANDARDCOST', 'VATCLASS', 'CLOSINGBALANCE', 'QECODE'];
+// VERIFY: CREDITLIMIT, BILLCREDITPERIOD and PRICELEVEL (ledger) and FULLPRICELIST (item price levels)
+// on a live TallyPrime. Tally exports debit balances as negative numbers.
+const LEDGER_FETCH = ['GUID', 'MASTERID', 'ALTERID', 'NAME', 'PARENT', 'LEDGERPHONE', 'LEDGERMOBILE', 'EMAIL', 'VATTINNUMBER', 'ADDRESS', 'QECODE',
+  'CLOSINGBALANCE', 'CREDITLIMIT', 'BILLCREDITPERIOD', 'PRICELEVEL'];
+const ITEM_FETCH = ['GUID', 'MASTERID', 'ALTERID', 'NAME', 'PARENT', 'BASEUNITS', 'PARTNO', 'STANDARDPRICE', 'STANDARDCOST', 'VATCLASS', 'CLOSINGBALANCE', 'QECODE', 'FULLPRICELIST'];
 
 export const ledgersRequest = (company, sinceAlterId = 0) =>
   collectionRequest(company, 'QELedgers', 'Ledger', LEDGER_FETCH, sinceAlterId ? `$AlterID > ${Number(sinceAlterId)}` : null);
 export const itemsRequest = (company, sinceAlterId = 0) =>
   collectionRequest(company, 'QEItems', 'StockItem', ITEM_FETCH, sinceAlterId ? `$AlterID > ${Number(sinceAlterId)}` : null);
+/** Every ledger's or item's current balance. Sales and receipts change balances and stock without
+ *  changing the master's AlterID, so these are read in full on every sync. */
+export const balancesRequest = (company, type) =>
+  collectionRequest(company, 'QEBal' + type, type, type === 'Ledger' ? ['GUID', 'NAME', 'QECODE', 'CLOSINGBALANCE', 'BILLCREDITPERIOD'] : ['GUID', 'NAME', 'QECODE', 'CLOSINGBALANCE'], null);
+/** Outstanding bills (bill-wise details), used for overdue amounts. VERIFY on a live TallyPrime. */
+export const billsRequest = (company) =>
+  collectionRequest(company, 'QEBills', 'Bills', ['NAME', 'PARENT', 'CLOSINGBALANCE', 'BILLDATE', 'BILLCREDITPERIOD'], null);
 /** Full list of keys only, used daily to detect masters deleted in Tally. */
 export const keysRequest = (company, type) =>
   collectionRequest(company, 'QEKeys' + type, type, ['GUID', 'NAME', 'QECODE'], null);
@@ -55,7 +65,7 @@ export function parseCollection(xml, tag) {
   const root = parseXml(xml);
   const err = tallyError(root);
   if (err) throw new Error(err);
-  return deepAll(root, tag).map(plain);
+  return deepAll(root, tag).map((n) => Object.defineProperty(plain(n), '_node', { value: n }));
 }
 
 function tallyError(root) {
@@ -75,6 +85,7 @@ export function ledgerFromTally(o) {
     code: o.QECODE || '', tallyGuid: o.GUID, tallyMasterId: num(o.MASTERID), tallyAlterId: num(o.ALTERID),
     name: o.NAME, parent: o.PARENT, role: ledgerRole(o.PARENT),
     phone: o.LEDGERMOBILE || o.LEDGERPHONE || '', email: o.EMAIL || '', trn: o.VATTINNUMBER || '', address: addr,
+    balance: drBalance(o.CLOSINGBALANCE), creditLimit: Math.abs(num(o.CREDITLIMIT)), creditDays: days(o.BILLCREDITPERIOD), priceLevel: o.PRICELEVEL || '',
   };
 }
 
@@ -83,7 +94,54 @@ export function itemFromTally(o) {
     code: o.QECODE || '', tallyGuid: o.GUID, tallyMasterId: num(o.MASTERID), tallyAlterId: num(o.ALTERID),
     name: o.NAME, group: o.PARENT || '', unit: o.BASEUNITS || 'Nos', partNo: o.PARTNO || '',
     rate: num(o.STANDARDPRICE), cost: num(o.STANDARDCOST), taxCode: o.VATCLASS || '', stock: num(o.CLOSINGBALANCE),
+    priceLevels: priceLevels(o._node),
   };
+}
+
+/** Balance with debit (they owe us) positive. Tally exports debit as negative. */
+export const drBalance = (s) => roundTo(-num(s), 2) || 0;
+/** "30 Days" -> 30. */
+const days = (s) => { const m = String(s ?? '').match(/(\d+)\s*Day/i); return m ? Number(m[1]) : 0; };
+export const ymd = (d) => d.toISOString().slice(0, 10).replace(/-/g, '');
+const fromYmd = (s) => (/^\d{8}$/.test(s) ? Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)) : NaN);
+
+/** Current rate (and discount %) for each price level, from the item's FULLPRICELIST entries.
+ *  The latest entry dated today or earlier wins; within it, the first quantity slab. */
+function priceLevels(node) {
+  const best = {};
+  const today = ymd(new Date());
+  for (const e of node ? findAll(node, 'FULLPRICELIST.LIST') : []) {
+    const level = childText(e, 'PRICELEVEL');
+    const date = childText(e, 'DATE') || '0';
+    if (!level || date > today) continue;
+    const slabs = findAll(e, 'PRICELEVELLIST.LIST')
+      .map((x) => ({ from: num(childText(x, 'STARTINGFROM')), rate: num(childText(x, 'RATE')), disc: num(childText(x, 'DISCOUNT')) }))
+      .filter((x) => x.rate > 0).sort((a, b) => a.from - b.from);
+    if (slabs.length && (!best[level] || date >= best[level].date)) best[level] = { date, rate: slabs[0].rate, disc: slabs[0].disc };
+  }
+  return Object.fromEntries(Object.entries(best).map(([k, v]) => [k, { rate: v.rate, disc: v.disc }]));
+}
+
+/** Overdue amount and days per party name, from outstanding bills. A bill is overdue only when it
+ *  has a credit period (its own, or the party's) and that period has passed. */
+export function overdueByParty(bills, creditDaysByName, today = new Date()) {
+  const now = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  const out = {};
+  for (const b of bills) {
+    const amt = drBalance(b.CLOSINGBALANCE);
+    const billDate = fromYmd(b.BILLDATE);
+    if (amt <= 0 || !b.PARENT || Number.isNaN(billDate)) continue;
+    let due = fromYmd(String(b.BILLCREDITPERIOD || '').trim());
+    if (Number.isNaN(due)) {
+      const d = days(b.BILLCREDITPERIOD) || creditDaysByName[b.PARENT] || 0;
+      due = d ? billDate + d * 864e5 : NaN;
+    }
+    if (Number.isNaN(due) || due >= now) continue;
+    const o = (out[b.PARENT] ||= { overdue: 0, overdueDays: 0 });
+    o.overdue = roundTo(o.overdue + amt, 2);
+    o.overdueDays = Math.max(o.overdueDays, Math.round((now - due) / 864e5));
+  }
+  return out;
 }
 
 const importEnv = (company, report, body) => env(

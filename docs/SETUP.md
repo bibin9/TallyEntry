@@ -140,6 +140,10 @@ Use a copy of the client's company. Each line checks one point marked `VERIFY` i
 5. Rename the customer in Tally, sync: the app shows the new name; old invoices still link to it.
 6. Receipt with cheque, Sales Order, and Purchase: check each voucher in Tally.
 7. Change a synced voucher in Tally, then edit it in the app: the app shows Conflict.
+8. Cancel a synced invoice in the app, sync: Day Book shows the same voucher number as cancelled.
+9. Customer balances: pick a customer with bill-wise outstanding in the app. The balance should match the ledger's closing balance in Tally, and the overdue amount should match Tally's Ledger Outstandings (bills past their credit period). If overdue shows nothing and the connector log says it could not read outstanding bills, the `Bills` collection in `billsRequest` needs adjusting.
+10. Credit limit, credit days and price level set on a customer in Tally appear in the app after a sync. An item with a price list for that price level fills its rate in the app.
+11. Post a sale in Tally itself: within one sync the app shows the customer's new balance and the item's new stock.
 
 Record the TallyPrime release tested and any changes, then mark the integration as verified in the README.
 
