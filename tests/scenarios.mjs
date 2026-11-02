@@ -34,6 +34,22 @@ export function scenarios(test, makeBackend) {
     assert.equal(ctx.m.ledgers.find((l) => l.code === 'C000001').name, 'Al Madina Supermarket');
   });
 
+  test('an empty <LEDGER/> or <STOCKITEM/> from a real TallyPrime is ignored, not saved as a blank master', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    // Real TallyPrime answered "nothing changed" with an empty object; reproduce that.
+    const tally = async (x) => {
+      const out = await ctx.sim.handle(x);
+      return String(out).replace(/<\/COLLECTION>/, '<LEDGER NAME="" RESERVEDNAME=""></LEDGER><STOCKITEM></STOCKITEM></COLLECTION>');
+    };
+    const conn = new Connector({ tally, relay: ctx.relay, company: ctx.sim.company });
+    for (let i = 0; i < 3; i++) assert.equal((await conn.runOnce()).error, null);
+    const m = await ctx.device.masters(0);
+    assert.equal(m.ledgers.filter((l) => !l.name).length, 0);
+    assert.equal(m.items.filter((l) => !l.name).length, 0);
+    assert.equal(m.ledgers.length, ctx.m.ledgers.length);
+    assert.equal(m.items.length, ctx.m.items.length);
+  });
+
   test('AC7: later master syncs transfer only additions and changes', async (t) => {
     const ctx = await setup(); t.after(ctx.cleanup);
     const r2 = await ctx.conn.runOnce();
