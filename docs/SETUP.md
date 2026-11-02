@@ -87,27 +87,36 @@ Manual run (for troubleshooting, from an administrator prompt): `node "C:\Progra
 **New client company.** Open `https://<your-app-address>/owner.html` and enter the owner key. Then fill in **New client company**:
 - company name,
 - company ID (suggested from the name),
-- first office admin's name and code.
+- first office admin's name, code and password (one is suggested).
 
-Click **Create company**. Two keys are shown once:
-- the **admin's sign-in key**, which can be sent by WhatsApp as a one-tap sign-in link,
+Click **Create company**. Shown once:
+- the **admin's sign-in details** (Company ID, user code, password), with **Send by WhatsApp**,
 - the **office connector key** for `install.cmd` on the client's Tally PC.
 
-**Salespeople.** The client's office admin opens the app and goes to **More > Users and sign-in keys**. For each person they enter the name, a 2 to 6 letter code (used in document numbers, for example SI-AHM-0001) and a role:
-- **Sales**: creates entries.
-- **Office admin**: also manages settings, users and conflicts.
+Tick **Remember on this device** when signing in to the owner page on your own phone or laptop; **Lock** forgets the key.
 
-The key is shown once, with **Send by WhatsApp**. The message holds a link that fills in the key on the phone.
+**Salespeople.** The client's office admin opens the app and goes to **More > Users and passwords**. For each person they enter the name, a 2 to 6 letter code (used in document numbers, for example SI-AHM-0001), a role and a password (one is suggested):
+- **Sales**: creates entries.
+- **Office admin**: also manages settings, users, conflicts, the archive and the Tally sync check.
+
+The sign-in details are shown once, with **Send by WhatsApp**. On the phone the person opens the app and signs in with **Company ID, user code and password**. Five wrong passwords lock that person for 15 minutes. Passwords are stored as bcrypt hashes.
+
+A sign-in key with a one-tap WhatsApp link (**New key**) still works, under **Other ways to sign in**.
 
 | To do this | Use |
 | --- | --- |
-| Lost phone or a person leaves | **New key** (the old key stops working at once) or **Switch off** |
-| Admin lost their own key | Owner page > the company > **Users** > **New key** |
+| Forgotten password or locked out | **Reset password** (also unlocks) |
+| Lost phone or a person leaves | **Reset password** and **New key** (signs them out of every phone at once), or **Switch off** |
+| Admin forgot their own password | Owner page > the company > **Users** > **Reset password** |
 | Tally PC replaced or connector key exposed | Owner page > **New connector key**, then run `install.cmd -NewKey` on the Tally PC |
 
 Safety rules: an admin cannot switch themselves off or demote themselves, and every company keeps at least one active admin. Keys are stored only as SHA-256 hashes.
 
 Tally ledger names, company details, logo and VAT are set by the office admin in the app under **More**.
+
+**Data kept on the server.** Each company's admin sets this under **More > Company and documents**: entries already in Tally stay active for 7 days, are then archived for 30 days (admins can search them under **More > Archive**), then deleted. Phones keep 2 days. Anything not yet in Tally is never archived or deleted. The cleanup runs by itself about once an hour while the office connector is running.
+
+**Is everything in Tally?** Admins open **More > Tally sync check**: counts of entries waiting, failed or in conflict, the oldest one waiting, and whether the office PC is talking to Tally.
 
 **After updating the code:** run `relay/supabase/schema.sql` again in the Supabase SQL editor. It's safe to re-run, and it adds new database functions.
 
@@ -117,7 +126,7 @@ Command-line alternative: `node relay/supabase/new-tenant.mjs --id al-noor --nam
 
 1. Open the app address in Safari (iPhone) or Chrome (Android, PC).
 2. **Install it**: iPhone: Share > Add to Home Screen. Android/PC: Install app. On iPhone this matters: iOS can clear storage of web apps that are not installed.
-3. More > Connection: leave the server address empty, enter the user's sign-in key, tap **Use live mode**.
+3. The app opens on the sign-in screen: enter the Company ID, user code and password from the office admin, tap **Sign in**.
 4. Wait for the first sync (customers and items download), then the app works offline.
 
 ## 6. First live test on a real TallyPrime (do this before go-live)

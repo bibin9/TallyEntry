@@ -72,7 +72,11 @@ export class DemoBackend {
   async resolve(id, choice) { this._net(); const r = await this.core.resolveConflict(TID, id, choice); setTimeout(() => this.tick(), 300); return r; }
   async log() { return this.core.getLog(TID); }
   async connectorStatus() { return this.core.connectorStatus(TID); }
-  _users(op, body) { this._net(); const r = usersOp(this.userKeys, TID, 'demo-user', op, body); if (op !== 'users.list') this._save(true); return r; }
+  async _users(op, body) { this._net(); const r = await usersOp(this.userKeys, TID, 'demo-user', op, body); if (op !== 'users.list') this._save(true); return r; }
+  async setPassword(id, password) { return this._users('users.setpassword', { id, password }); }
+  async archive(q) { this._net(); return this.core.getArchive(TID, q); }
+  async logout() {}
+  async syncCheck() { this._net(); return this.core.getSummary(TID, Object.fromEntries(Object.values(this.userKeys).map((u) => [u.id, u.name]))); }
   async users() { return this._users('users.list'); }
   async addUser(u) { return this._users('users.add', u); }
   async updateUser(u) { return this._users('users.update', u); }

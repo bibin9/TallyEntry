@@ -1,9 +1,17 @@
 // Owner page: create client companies, their admins and connector keys, without SQL.
-// The owner key is kept only for this browser tab (sessionStorage) and checked by the server
-// against the OWNER_KEY secret.
+// The owner key is kept for this browser tab (sessionStorage), or on this device (localStorage) if
+// "Remember on this device" is ticked, and is checked by the server against the OWNER_KEY secret.
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const S = { key: sessionStorage.getItem('qe-owner') || '', open: null, shown: null };
+const stored = () => { try { return sessionStorage.getItem('qe-owner') || localStorage.getItem('qe-owner') || ''; } catch { return ''; } };
+const forget = () => { try { sessionStorage.removeItem('qe-owner'); localStorage.removeItem('qe-owner'); } catch {} };
+const S = { key: stored(), open: null, shown: null };
+/** Easy to read out and type on a phone: no 0/O or 1/l/I. */
+function suggestPassword() {
+  const a = 'abcdefghjkmnpqrstuvwxyz', d = '23456789', r = crypto.getRandomValues(new Uint32Array(8));
+  return [...r].map((x, i) => (i < 5 ? a : d)[x % (i < 5 ? a : d).length]).join('');
+}
+const loginMsg = (l) => `QuickEntry sign-in for ${l.name}\nOpen ${location.origin} on your phone and sign in with:\nCompany ID: ${l.company}\nUser code: ${l.code}\nPassword: ${l.password}\nKeep this message private.`;
 
 async function call(method, path, body) {
   const r = await fetch(path, { method, cache: 'no-store', headers: { Authorization: 'Bearer ' + S.key, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
@@ -18,7 +26,10 @@ function keyCard() {
   const k = S.shown; S.shown = null;
   if (!k) return '';
   return `<div class="card keycard"><div class="sec">${esc(k.title)}</div><p class="small">Shown only now. Copy them somewhere safe or send them now.</p>
-    ${k.items.map((i) => `<label>${esc(i.label)}</label><code class="key">${esc(i.key)}</code>
+    ${(k.logins || []).map((l) => `<label>Sign-in details for ${esc(l.name)}</label>
+      <table class="tbl logindet"><tr><td>Company ID</td><td><b>${esc(l.company)}</b></td></tr><tr><td>User code</td><td><b>${esc(l.code)}</b></td></tr><tr><td>Password</td><td><b>${esc(l.password)}</b></td></tr></table>
+      <div class="btns"><button class="btn sm" data-copy="${esc(loginMsg(l))}">Copy</button><a class="btn sm wa" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(loginMsg(l))}">Send by WhatsApp</a></div>`).join('')}
+    ${(k.items || []).map((i) => `<label>${esc(i.label)}</label><code class="key">${esc(i.key)}</code>
       <div class="btns"><button class="btn sm" data-copy="${esc(i.key)}">Copy</button>${i.person ? `<a class="btn sm wa" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msgFor(i.person, i.key))}">Send by WhatsApp</a>` : ''}</div>`).join('')}</div>`;
 }
 
@@ -26,20 +37,23 @@ async function render() {
   $('#signout').hidden = !S.key;
   if (!S.key) {
     $('#view').innerHTML = `<main class="form"><div class="card"><div class="sec">Owner sign-in</div>
-      <p class="small muted">Enter the owner key (the OWNER_KEY secret in Cloudflare). It is kept only until you close this tab.</p>
-      <label for="ok">Owner key</label><input id="ok" type="password" autocomplete="off"><button class="btn full" data-act="signin">Open</button></div></main>`;
+      <p class="small muted">Enter the owner key (the OWNER_KEY secret in Cloudflare).</p>
+      <label for="ok">Owner key</label><input id="ok" type="password" autocomplete="off">
+      <label class="tg"><input type="checkbox" id="remember"> Remember on this device (only on your own phone or laptop)</label>
+      <button class="btn full" data-act="signin">Open</button></div></main>`;
     return;
   }
   let tenants;
   try { tenants = await call('GET', '/api/owner/tenants'); } catch (e) {
-    if (e.status === 401) { S.key = ''; sessionStorage.removeItem('qe-owner'); toast('Wrong owner key'); return render(); }
+    if (e.status === 401) { S.key = ''; forget(); toast('Wrong owner key'); return render(); }
     $('#view').innerHTML = `<main><div class="card err">${esc(e.message)}</div></main>`; return;
   }
   let usersHtml = '';
   if (S.open) {
     const users = await call('GET', '/api/owner/users?tenant=' + encodeURIComponent(S.open));
-    usersHtml = users.map((u) => `<div class="urow ${u.active ? '' : 'off'}"><b>${esc(u.name)}</b> <span class="small muted">${esc(u.code)} · ${u.role}${u.active ? '' : ' · off'}</span>
-      <div class="btns"><button class="btn sm ghost" data-act="ukey" data-id="${esc(u.id)}" data-name="${esc(u.name)}">New key</button>
+    usersHtml = users.map((u) => `<div class="urow ${u.active ? '' : 'off'}"><b>${esc(u.name)}</b> <span class="small muted">${esc(u.code)} · ${u.role}${u.hasPassword ? ' · password set' : ' · no password'}${u.active ? '' : ' · off'}</span>
+      <div class="btns"><button class="btn sm" data-act="upw" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-code="${esc(u.code)}">${u.hasPassword ? 'Reset password' : 'Set password'}</button>
+      <button class="btn sm ghost" data-act="ukey" data-id="${esc(u.id)}" data-name="${esc(u.name)}">New key</button>
       <button class="btn sm ghost" data-act="utoggle" data-id="${esc(u.id)}" data-on="${u.active ? 0 : 1}">${u.active ? 'Switch off' : 'Switch on'}</button></div></div>`).join('');
   }
   $('#view').innerHTML = `<main class="form">${keyCard()}
@@ -49,15 +63,17 @@ async function render() {
         <button class="btn sm ghost" data-act="ckey" data-id="${esc(t.id)}" data-name="${esc(t.name)}">New connector key</button></div>
         ${S.open === t.id ? `<div class="card" style="margin:6px 0">${usersHtml || '<p class="muted">No users</p>'}
           <label>Add a person</label><div class="inline"><input id="au-name" placeholder="Name"><input id="au-code" placeholder="Code" maxlength="6" style="max-width:90px">
-          <select id="au-role" aria-label="Role"><option value="sales">Sales</option><option value="admin">Admin</option></select><button class="btn sm" data-act="uadd">Add</button></div></div>` : ''}</div>`).join('') || '<p class="muted">No companies yet.</p>'}
+          <select id="au-role" aria-label="Role"><option value="sales">Sales</option><option value="admin">Admin</option></select></div>
+          <label for="au-pw">Password</label><div class="inline"><input id="au-pw" value="${esc(suggestPassword())}" autocomplete="off"><button class="btn sm" data-act="uadd">Add</button></div></div>` : ''}</div>`).join('') || '<p class="muted">No companies yet.</p>'}
     </div>
     <div class="card"><div class="sec">New client company</div>
       <label for="nc-name">Company name (as on invoices)</label><input id="nc-name" placeholder="Al Noor Trading LLC">
       <label for="nc-id">Company ID (short, lowercase, for example al-noor)</label><input id="nc-id" autocapitalize="none">
       <label for="nc-admin">First office admin's name</label><input id="nc-admin">
       <label for="nc-code">Admin code (2 to 6 letters)</label><input id="nc-code" maxlength="6">
+      <label for="nc-pw">Admin password (at least 6 characters)</label><input id="nc-pw" value="${esc(suggestPassword())}" autocomplete="off">
       <button class="btn full" data-act="create">Create company</button>
-      <p class="small muted">Creates the company with default UAE VAT settings, its first admin and the office connector key. The admin then adds salespeople in the app under More &gt; Users.</p></div></main>`;
+      <p class="small muted">Creates the company with default UAE VAT settings, its first admin and the office connector key. The admin then adds salespeople in the app under More &gt; Users and passwords.</p></div></main>`;
 }
 
 document.addEventListener('input', (e) => {
@@ -68,19 +84,28 @@ document.addEventListener('input', (e) => {
 document.addEventListener('click', async (e) => {
   const c = e.target.closest('[data-copy]');
   if (c) return navigator.clipboard.writeText(c.dataset.copy).then(() => toast('Copied'), () => toast('Select the key and copy it'));
-  if (e.target.id === 'signout') { S.key = ''; sessionStorage.removeItem('qe-owner'); return render(); }
+  if (e.target.id === 'signout') { S.key = ''; forget(); return render(); }
   const a = e.target.closest('[data-act]');
   if (!a) return;
   try {
     const act = a.dataset.act;
-    if (act === 'signin') { S.key = $('#ok').value.trim(); sessionStorage.setItem('qe-owner', S.key); }
-    else if (act === 'create') {
+    if (act === 'signin') {
+      S.key = $('#ok').value.trim();
+      try { (($('#remember').checked) ? localStorage : sessionStorage).setItem('qe-owner', S.key); } catch {}
+    } else if (act === 'create') {
+      const pw = $('#nc-pw').value.trim();
+      if (pw.length < 6) return toast('The admin password must be at least 6 characters');
       const r = await call('POST', '/api/owner/tenants', { name: $('#nc-name').value.trim(), id: $('#nc-id').value.trim(), adminName: $('#nc-admin').value.trim(), adminCode: $('#nc-code').value.trim() });
-      S.shown = { title: `${r.name} created`, items: [
-        { label: `Sign-in key for ${r.admin.name} (office admin, for the app)`, key: r.admin.key, person: r.admin.name },
-        { label: 'Office connector key (only for install.cmd on the Tally PC)', key: r.connectorKey },
-      ] };
+      await call('POST', '/api/owner/users/password', { tenant: r.id, id: r.admin.id, password: pw });
+      S.shown = { title: `${r.name} created`,
+        logins: [{ name: `${r.admin.name} (office admin)`, company: r.id, code: r.admin.code, password: pw }],
+        items: [{ label: 'Office connector key (only for install.cmd on the Tally PC)', key: r.connectorKey }] };
       S.open = r.id;
+    } else if (act === 'upw') {
+      const pw = prompt(`New password for ${a.dataset.name} (at least 6 characters). They are signed out of every phone.`, suggestPassword());
+      if (pw === null) return;
+      await call('POST', '/api/owner/users/password', { tenant: S.open, id: a.dataset.id, password: pw.trim() });
+      S.shown = { title: `Password set for ${a.dataset.name}`, logins: [{ name: a.dataset.name, company: S.open, code: a.dataset.code, password: pw.trim() }] };
     } else if (act === 'open') S.open = S.open === a.dataset.id ? null : a.dataset.id;
     else if (act === 'ckey') {
       if (!confirm(`New connector key for ${a.dataset.name}? The Tally PC stops syncing until install.cmd is run again with -NewKey.`)) return;
@@ -92,8 +117,11 @@ document.addEventListener('click', async (e) => {
       S.shown = { title: `New key for ${a.dataset.name}`, items: [{ label: 'Sign-in key', key: r.key, person: a.dataset.name }] };
     } else if (act === 'utoggle') await call('POST', '/api/owner/users/update', { tenant: S.open, id: a.dataset.id, active: a.dataset.on === '1' });
     else if (act === 'uadd') {
+      const pw = $('#au-pw').value.trim();
+      if (pw.length < 6) return toast('Password must be at least 6 characters');
       const r = await call('POST', '/api/owner/users', { tenant: S.open, name: $('#au-name').value.trim(), code: $('#au-code').value.trim(), role: $('#au-role').value });
-      S.shown = { title: `${r.name} added`, items: [{ label: 'Sign-in key', key: r.key, person: r.name }] };
+      await call('POST', '/api/owner/users/password', { tenant: S.open, id: r.id, password: pw });
+      S.shown = { title: `${r.name} added`, logins: [{ name: r.name, company: S.open, code: r.code, password: pw }] };
     }
     await render();
   } catch (err) { toast(err.message); }

@@ -124,6 +124,29 @@ try {
   const ln = (await pool.query('select count(*)::int n from txn_lines where tenant_id = $1 and txn_id = $2', [tid, edits[0].id])).rows[0].n;
   record('Consistency', 'Edited invoices go back in the queue as v2, and a late v1 answer from Tally does not overwrite them',
     stale.status === 200 && st.status === 'queued' && st.version === 2 && ln === 2, { status: st.status, version: st.version, lines: ln });
+
+  // ------------------------------------------------ 6. Password sign-in: 30 phones at once, then sustained use of session keys
+  await Promise.all(reps.map((rep) => req(admin, 'POST', '/api/users/password', { id: rep.id, password: 'pass-' + rep.code })));
+  const li = []; t0 = Date.now();
+  const logins = await Promise.all(reps.map(async (rep) => { const s = Date.now(); const r = await fetch(BASE + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ company: tid, code: rep.code, password: 'pass-' + rep.code }) }); li.push(Date.now() - s); return { status: r.status, data: await r.json() }; }));
+  record('Sign-in', `${DEVICES} salespeople sign in with a password at the same moment (bcrypt check each)`, logins.every((r) => r.status === 200 && r.data.key),
+    { logins: logins.length, ok: logins.filter((r) => r.status === 200).length, wallMs: Date.now() - t0, p50ms: pct(li, 0.5), maxMs: Math.max(...li) });
+  await sustained('Signed in with a password: session check (GET /api/me), 50 at once for 15 s', { path: '/api/me', headers: { Authorization: 'Bearer ' + logins[0].data.key } }, 2000);
+
+  // ------------------------------------------------ 7. Retention cleanup on a busy company
+  await pool.query("update sync_mappings set synced_at = now() - interval '8 days' where tenant_id = $1", [tid]);
+  t0 = Date.now();
+  const c1 = (await pool.query('select qe_cleanup($1) as r', [tid])).rows[0].r;
+  const archMs = Date.now() - t0;
+  const archList = await req(admin, 'GET', '/api/archive?q=SI-R01');
+  await pool.query("update txns set archived_at = now() - interval '31 days' where tenant_id = $1 and archived_at is not null", [tid]);
+  t0 = Date.now();
+  const c2 = (await pool.query('select qe_cleanup($1) as r', [tid])).rows[0].r;
+  const delMs = Date.now() - t0;
+  const leftQ = (await pool.query("select count(*)::int n from txns where tenant_id = $1 and status <> 'synced'", [tid])).rows[0].n;
+  record('Retention', `Archiving then deleting ${total} old invoices in one cleanup run; the 20 edited ones still waiting for Tally are kept`,
+    c1.archived === total - 20 && c2.deleted === total - 20 && leftQ === 20 && archList.status === 200 && archList.data.length === 40,
+    { archived: c1.archived, archiveMs: archMs, deleted: c2.deleted, deleteMs: delMs, keptWaiting: leftQ, archiveSearchHits: archList.data.length });
 } finally {
   await pool.query('delete from tenants where id = $1', [tid]);
   await pool.end();

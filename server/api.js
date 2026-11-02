@@ -13,6 +13,8 @@
 import { defaultSettings } from '../app/core/defaults.js';
 
 const ROUTES = {
+  'POST /api/login': 'login',              // Company ID + user code + password -> session key (no key needed)
+  'POST /api/logout': 'logout',
   'GET /api/me': 'me',
   'GET /api/settings': 'settings.get',
   'PUT /api/settings': 'settings.put',
@@ -34,6 +36,9 @@ const ROUTES = {
   'POST /api/users': 'users.add',
   'POST /api/users/update': 'users.update',
   'POST /api/users/resetkey': 'users.resetkey',
+  'POST /api/users/password': 'users.setpassword',
+  'GET /api/archive': 'archive.list',
+  'GET /api/sync-check': 'txns.summary',
   // owner (OWNER_KEY): manage client companies
   'GET /api/owner/tenants': 'owner.tenants',
   'POST /api/owner/tenants': 'owner.tenant.create',
@@ -42,6 +47,7 @@ const ROUTES = {
   'POST /api/owner/users': 'owner.users.add',
   'POST /api/owner/users/update': 'owner.users.update',
   'POST /api/owner/users/resetkey': 'owner.users.resetkey',
+  'POST /api/owner/users/password': 'owner.users.setpassword',
 };
 const STATUS = { '28000': 401, '42501': 403, '22023': 400 };
 
@@ -68,7 +74,7 @@ export async function handleApi(request, env) {
   const op = ROUTES[`${request.method} ${url.pathname.replace(/\/$/, '')}`];
   if (!op) return json(404, { error: 'Not found' });
   const token = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
-  if (!token) return json(401, { error: 'Please sign in again' });
+  if (!token && op !== 'login') return json(401, { error: 'Please sign in again' });
 
   let body = {};
   if (request.method === 'GET') body = Object.fromEntries(url.searchParams);
@@ -81,7 +87,13 @@ export async function handleApi(request, env) {
   // Owner operations are checked here against the OWNER_KEY secret and sent with no user key;
   // everything else is checked by the database against the key's hash.
   let tokenHash;
-  if (op.startsWith('owner.')) {
+  if (op === 'login') {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return json(400, { error: 'Invalid input' });
+    const { company, code, password } = body;
+    if (![company, code, password].every((v) => typeof v === 'string' && v.length <= 100)) return json(400, { error: 'Enter your company ID, user code and password' });
+    body = { company, code, password };
+    tokenHash = null;
+  } else if (op.startsWith('owner.')) {
     if (!env.OWNER_KEY || env.OWNER_KEY.length < 24) return json(404, { error: 'Owner access is not set up: add an OWNER_KEY secret (at least 24 characters)' });
     if ((await sha256(token)) !== (await sha256(env.OWNER_KEY))) return json(401, { error: 'Wrong owner key' });
     tokenHash = null;
@@ -124,5 +136,6 @@ export async function handleApi(request, env) {
     else if (code === 'PGRST202' || r.status === 404) why = 'Server setup: database function qe_api not found (run relay/supabase/schema.sql in Supabase)';
     return json(500, { error: why });
   }
+  if (op === 'login' && !data?.ok) return json(data?.locked ? 429 : 401, { error: data?.error || 'Wrong company ID, user code or password' });
   return json(200, data);
 }
