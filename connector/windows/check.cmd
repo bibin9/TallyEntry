@@ -8,7 +8,9 @@ if errorlevel 1 (
 set "QE_DATA=%ProgramData%\QuickEntry"
 set "QE_NODE=node.exe"
 where node.exe >nul 2>&1 || set "QE_NODE=%ProgramFiles%\nodejs\node.exe"
-"%QE_NODE%" "%~dp0connector\index.js" --config "%QE_DATA%\config.json" --check
+set "QE_FLAGS="
+"%QE_NODE%" --use-system-ca -e 0 >nul 2>&1 && set "QE_FLAGS=--use-system-ca"
+"%QE_NODE%" %QE_FLAGS% "%~dp0connector\index.js" --config "%QE_DATA%\config.json" --check
 echo.
 powershell -NoProfile -Command "$t = Get-ScheduledTask -TaskName 'QuickEntry Connector' -ErrorAction SilentlyContinue; if ($t) { 'Background task: ' + $t.State } else { 'Background task: NOT INSTALLED' }"
 echo.
