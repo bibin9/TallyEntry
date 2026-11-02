@@ -1,11 +1,11 @@
 // Office connector logic: Tally <-> cloud. Transport-agnostic.
 //   tally(xml) -> Promise<xml>   (Node: HTTP POST to http://localhost:9000; demo: simulator)
-//   relay: { hello, saveState, pushMasters, reconcile, queue, result }  (HTTP client or in-process)
+//   relay: { hello, saveState, pushMasters, pushBalances, reconcile, queue, result }  (HTTP client or in-process)
 
 import * as TX from './tally-xml.js';
 import { DEFAULT_TAX } from './vat.js';
 
-export const CONNECTOR_VERSION = '0.1.0';
+export const CONNECTOR_VERSION = '0.2.0';
 
 export const DEFAULT_LEDGER_MAP = {
   salesLedger: 'Sales - Local', purchaseLedger: 'Purchase - Local',
@@ -94,9 +94,17 @@ export class Connector {
         list = [...byGuid.values()];
       }
       const maxAlter = Math.max(since, ...list.map((m) => m.tallyAlterId));
+      for (const m of list) this._bal?.[kind].delete(m.code); // a full push replaces the record; resend its balance
       const counts = list.length ? (await this.relay.pushMasters(kind === 'ledgers' ? { ledgers: list } : { items: list }))[kind] : { added: 0, updated: 0, unchanged: 0 };
       this.state[key] = maxAlter;
       out[kind] = { fetched: list.length, full, ...counts };
+    }
+    // Never let the balance refresh hold up posting vouchers.
+    try { out.balances = await this.refreshBalances(); this._balWarned = false; }
+    catch (e) {
+      if (e.tallyDown) throw e;
+      if (!this._balWarned) this.log('warn', `Balance and stock refresh skipped: ${e.message}`);
+      this._balWarned = true; out.balances = { error: e.message };
     }
     // Daily: compare full key lists to find masters deleted in Tally.
     const last = this.state.lastKeysCheck ? Date.parse(this.state.lastKeysCheck) : 0;
@@ -110,6 +118,42 @@ export class Connector {
     await this.relay.saveState(this.state);
     this.log('info', `Masters: ledgers ${out.ledgers.fetched} fetched, items ${out.items.fetched} fetched`);
     return out;
+  }
+
+  /** Balances, overdue amounts and stock change with every sale and receipt, but the masters'
+   *  AlterIDs do not. Read them in full and send only what changed since the last send. */
+  async refreshBalances() {
+    if (!this.relay.pushBalances) return null;
+    this._bal ||= { ledgers: new Map(), items: new Map() };
+    const codeOf = (o) => o.QECODE || 'G:' + o.GUID;
+    const ledgers = TX.parseCollection(await this._tally(TX.balancesRequest(this.company, 'Ledger')), 'LEDGER').filter((o) => o.GUID);
+    const items = TX.parseCollection(await this._tally(TX.balancesRequest(this.company, 'StockItem')), 'STOCKITEM').filter((o) => o.GUID);
+    let overdue = {};
+    try {
+      const creditDays = Object.fromEntries(ledgers.map((o) => [o.NAME, Number(String(o.BILLCREDITPERIOD || '').match(/\d+/)?.[0] || 0)]));
+      overdue = TX.overdueByParty(TX.parseCollection(await this._tally(TX.billsRequest(this.company)), 'BILL'), creditDays);
+      this._billsWarned = false;
+    } catch (e) {
+      if (!this._billsWarned) this.log('warn', `Could not read outstanding bills, so overdue amounts are not shown: ${e.message}`);
+      this._billsWarned = true;
+    }
+    const changed = { ledgers: [], items: [] };
+    const add = (kind, code, patch) => {
+      const key = JSON.stringify(patch);
+      if (this._bal[kind].get(code) === key) return;
+      changed[kind].push({ code, ...patch });
+      this._bal[kind].set(code, key);
+    };
+    for (const o of ledgers) add('ledgers', codeOf(o), { balance: TX.drBalance(o.CLOSINGBALANCE), overdue: overdue[o.NAME]?.overdue || 0, overdueDays: overdue[o.NAME]?.overdueDays || 0 });
+    for (const o of items) add('items', codeOf(o), { stock: Number(String(o.CLOSINGBALANCE || '').replace(/,/g, '').match(/-?\d+(\.\d+)?/)?.[0] || 0) });
+    if (!changed.ledgers.length && !changed.items.length) return { ledgers: 0, items: 0 };
+    try {
+      const r = await this.relay.pushBalances(changed);
+      return { ledgers: r?.ledgers ?? changed.ledgers.length, items: r?.items ?? changed.items.length };
+    } catch (e) {
+      for (const kind of ['ledgers', 'items']) for (const m of changed[kind]) this._bal[kind].delete(m.code); // retry next time
+      throw e;
+    }
   }
 
   // ------------------------------------------------------------------ transactions
@@ -198,6 +242,7 @@ export function directRelay(core, tid) {
     hello: (info) => core.connectorHello(tid, info),
     saveState: (s) => core.connectorSaveState(tid, s),
     pushMasters: (b) => core.connectorPushMasters(tid, b),
+    pushBalances: (b) => core.connectorPushBalances(tid, b),
     reconcile: (k, c) => core.connectorReconcile(tid, k, c),
     queue: () => core.connectorQueue(tid),
     result: (r) => core.connectorResult(tid, r),

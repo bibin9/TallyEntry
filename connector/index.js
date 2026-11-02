@@ -89,6 +89,7 @@ const relay = {
   hello: (info) => call('POST', '/api/connector/hello', info),
   saveState: (s) => call('POST', '/api/connector/state', s),
   pushMasters: (b) => call('POST', '/api/connector/masters', b),
+  pushBalances: (b) => call('POST', '/api/connector/balances', b),
   reconcile: (kind, codes) => call('POST', '/api/connector/reconcile', { kind, codes }),
   queue: () => call('GET', '/api/connector/queue'),
   result: (r) => call('POST', '/api/connector/result', r),

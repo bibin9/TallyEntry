@@ -13,6 +13,7 @@ export async function handleApi(core, auth, { method, path, query = {}, body = {
     if (method === 'POST' && op === 'hello') return ok(await core.connectorHello(tid, body));
     if (method === 'POST' && op === 'state') { await core.connectorSaveState(tid, body); return ok({ ok: true }); }
     if (method === 'POST' && op === 'masters') return ok(await core.connectorPushMasters(tid, body));
+    if (method === 'POST' && op === 'balances') return ok(await core.connectorPushBalances(tid, body));
     if (method === 'POST' && op === 'reconcile') return ok(await core.connectorReconcile(tid, body.kind, body.codes));
     if (method === 'GET' && op === 'queue') return ok(await core.connectorQueue(tid));
     if (method === 'POST' && op === 'result') return ok(await core.connectorResult(tid, body));

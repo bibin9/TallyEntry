@@ -32,6 +32,15 @@ const ITEMS = [
   ['Export Packing Crate', 'Nos', 120, 80, 'ZR', 'PK-EX'],
 ];
 
+// Credit terms and opening bills for the sample customers (same order as CUSTOMERS).
+const daysAgo = (n) => { const d = new Date(Date.now() - n * 864e5); return d.toISOString().slice(0, 10).replace(/-/g, ''); };
+const CREDIT = [
+  { creditLimit: 20000, creditDays: 30, bills: [{ name: 'OB-101', date: daysAgo(45), amount: 3200 }, { name: 'OB-102', date: daysAgo(10), amount: 1500 }] },
+  { creditLimit: 50000, creditDays: 30, priceLevel: 'Wholesale', bills: [{ name: 'OB-201', date: daysAgo(12), amount: 8400 }] },
+  { creditLimit: 5000, creditDays: 15, bills: [{ name: 'OB-301', date: daysAgo(40), amount: 6100 }] },
+  {}, {}, {},
+];
+
 export class TallySim {
   constructor(state) {
     this.s = state || TallySim.seed();
@@ -45,9 +54,11 @@ export class TallySim {
     L('Sales - Local', 'Sales Accounts'); L('Purchase - Local', 'Purchase Accounts');
     L('Output VAT', 'Duties & Taxes'); L('Input VAT', 'Duties & Taxes'); L('Round Off', 'Indirect Expenses');
     // Some masters start with a code already (as if the client had them); others get one from the connector.
-    CUSTOMERS.forEach(([name, phone, email, trn, address], i) => L(name, 'Sundry Debtors', { phone, email, trn, address, qeCode: i < 2 ? `C${String(i + 1).padStart(6, '0')}` : '' }));
+    CUSTOMERS.forEach(([name, phone, email, trn, address], i) => L(name, 'Sundry Debtors', { phone, email, trn, address, qeCode: i < 2 ? `C${String(i + 1).padStart(6, '0')}` : '',
+      ...CREDIT[i] }));
     SUPPLIERS.forEach(([name, phone, email, trn, address]) => L(name, 'Sundry Creditors', { phone, email, trn, address }));
-    ITEMS.forEach(([name, unit, rate, cost, vat, partNo]) => sim.addItem({ name, unit, rate, cost, vatClass: vat, partNo, stock: 100 + name.length * 7 }));
+    ITEMS.forEach(([name, unit, rate, cost, vat, partNo]) => sim.addItem({ name, unit, rate, cost, vatClass: vat, partNo, stock: 100 + name.length * 7,
+      priceLevels: { Wholesale: { rate: Math.round(rate * 0.9 * 100) / 100, disc: 0 } } }));
     return s;
   }
 
@@ -55,13 +66,13 @@ export class TallySim {
   _alter() { return ++this.s.alterSeq; }
   _mid() { return ++this.s.masterSeq; }
 
-  addLedger({ name, parent, phone = '', email = '', trn = '', address = '', qeCode = '' }) {
+  addLedger({ name, parent, phone = '', email = '', trn = '', address = '', qeCode = '', creditLimit = 0, creditDays = 0, priceLevel = '', bills = [] }) {
     const id = this._mid();
-    this.s.ledgers[name] = { guid: uuid(), masterId: id, alterId: this._alter(), name, parent, phone, email, trn, address, qeCode };
+    this.s.ledgers[name] = { guid: uuid(), masterId: id, alterId: this._alter(), name, parent, phone, email, trn, address, qeCode, creditLimit, creditDays, priceLevel, bills };
     return this.s.ledgers[name];
   }
-  addItem({ name, unit = 'Nos', rate = 0, cost = 0, vatClass = 'SR', partNo = '', stock = 0, group = 'Primary', qeCode = '' }) {
-    this.s.items[name] = { guid: uuid(), masterId: this._mid(), alterId: this._alter(), name, unit, rate, cost, vatClass, partNo, stock, group, qeCode };
+  addItem({ name, unit = 'Nos', rate = 0, cost = 0, vatClass = 'SR', partNo = '', stock = 0, group = 'Primary', qeCode = '', priceLevels = {} }) {
+    this.s.items[name] = { guid: uuid(), masterId: this._mid(), alterId: this._alter(), name, unit, rate, cost, vatClass, partNo, stock, group, qeCode, priceLevels };
     return this.s.items[name];
   }
   /** Rename a ledger the way a Tally user would (Alt+C / Alter). */
@@ -108,6 +119,34 @@ export class TallySim {
     }
   }
 
+  /** Outstanding bills for a ledger: opening bills plus sales, with receipts applied oldest first.
+   *  Like Tally, posting a voucher changes balances and stock but not the master's AlterID. */
+  _bills(l) {
+    const open = (l.bills || []).map((b) => ({ ...b }));
+    const live = this.s.vouchers.filter((v) => v.party === l.name && !v.cancelled);
+    for (const v of live) if (['Sales', 'Payment'].includes(v.vchType)) open.push({ name: v.number, date: v.date, amount: v.amount });
+    open.sort((a, b) => a.date.localeCompare(b.date));
+    let credit = live.filter((v) => ['Receipt', 'Purchase'].includes(v.vchType)).reduce((t, v) => t + v.amount, 0);
+    for (const b of open) { const used = Math.min(credit, b.amount); b.amount = Math.round((b.amount - used) * 100) / 100; credit -= used; }
+    return { bills: open.filter((b) => b.amount > 0.004), extraCredit: credit };
+  }
+  balanceOf(name) {
+    const l = this.s.ledgers[name];
+    const { bills, extraCredit } = this._bills(l);
+    return Math.round((bills.reduce((t, b) => t + b.amount, 0) - extraCredit) * 100) / 100; // debit positive
+  }
+  stockOf(name) {
+    const it = this.s.items[name];
+    let q = it.stock;
+    for (const v of this.s.vouchers) if (!v.cancelled) for (const ln of v.lines || []) if (ln.item === name) {
+      const n = parseFloat(String(ln.qty)) || 0;
+      if (v.vchType === 'Sales') q -= n; else if (v.vchType === 'Purchase') q += n;
+    }
+    return Math.round(q * 1000) / 1000;
+  }
+  /** A Tally user changes a credit limit (an edit of the master, so its AlterID changes). */
+  setCredit(name, creditLimit, creditDays) { const l = this.s.ledgers[name]; Object.assign(l, { creditLimit, creditDays, alterId: this._alter() }); return l; }
+
   dayBook() {
     return this.s.vouchers.map((v) => ({ ...v }));
   }
@@ -145,13 +184,21 @@ export class TallySim {
       for (const l of Object.values(this.s.ledgers)) if (keep(l)) {
         out += `<LEDGER NAME="${esc(l.name)}" RESERVEDNAME=""><GUID>${l.guid}</GUID><MASTERID> ${l.masterId}</MASTERID><ALTERID> ${l.alterId}</ALTERID><PARENT>${esc(l.parent)}</PARENT>`
           + `<LEDGERMOBILE>${esc(l.phone)}</LEDGERMOBILE><EMAIL>${esc(l.email)}</EMAIL><VATTINNUMBER>${esc(l.trn)}</VATTINNUMBER>`
-          + `<ADDRESS.LIST TYPE="String"><ADDRESS>${esc(l.address)}</ADDRESS></ADDRESS.LIST>${l.qeCode ? u('QECODE', l.qeCode) : ''}</LEDGER>`;
+          + `<ADDRESS.LIST TYPE="String"><ADDRESS>${esc(l.address)}</ADDRESS></ADDRESS.LIST>${l.qeCode ? u('QECODE', l.qeCode) : ''}`
+          + `<CLOSINGBALANCE>${(-this.balanceOf(l.name)).toFixed(2)}</CLOSINGBALANCE><CREDITLIMIT>${l.creditLimit ? (-l.creditLimit).toFixed(2) : ''}</CREDITLIMIT>`
+          + `<BILLCREDITPERIOD>${l.creditDays ? l.creditDays + ' Days' : ''}</BILLCREDITPERIOD><PRICELEVEL>${esc(l.priceLevel || '')}</PRICELEVEL></LEDGER>`;
+      }
+    } else if (type === 'Bills') {
+      for (const l of Object.values(this.s.ledgers)) for (const b of this._bills(l).bills) {
+        out += `<BILL NAME="${esc(b.name)}"><NAME>${esc(b.name)}</NAME><PARENT>${esc(l.name)}</PARENT><CLOSINGBALANCE>${(-b.amount).toFixed(2)}</CLOSINGBALANCE><BILLDATE>${b.date}</BILLDATE><BILLCREDITPERIOD></BILLCREDITPERIOD></BILL>`;
       }
     } else if (type === 'StockItem') {
       for (const i of Object.values(this.s.items)) if (keep(i)) {
         out += `<STOCKITEM NAME="${esc(i.name)}"><GUID>${i.guid}</GUID><MASTERID> ${i.masterId}</MASTERID><ALTERID> ${i.alterId}</ALTERID><PARENT>${esc(i.group)}</PARENT>`
           + `<BASEUNITS>${esc(i.unit)}</BASEUNITS><PARTNO>${esc(i.partNo)}</PARTNO><STANDARDPRICE>${i.rate.toFixed(2)}/${esc(i.unit)}</STANDARDPRICE><STANDARDCOST>${i.cost.toFixed(2)}/${esc(i.unit)}</STANDARDCOST>`
-          + `<VATCLASS>${esc(i.vatClass)}</VATCLASS><CLOSINGBALANCE> ${i.stock} ${esc(i.unit)}</CLOSINGBALANCE>${i.qeCode ? u('QECODE', i.qeCode) : ''}</STOCKITEM>`;
+          + `<VATCLASS>${esc(i.vatClass)}</VATCLASS><CLOSINGBALANCE> ${this.stockOf(i.name)} ${esc(i.unit)}</CLOSINGBALANCE>${i.qeCode ? u('QECODE', i.qeCode) : ''}`
+          + Object.entries(i.priceLevels || {}).map(([lvl, p]) => `<FULLPRICELIST.LIST><DATE>20250401</DATE><PRICELEVEL>${esc(lvl)}</PRICELEVEL><PRICELEVELLIST.LIST><RATE>${p.rate.toFixed(2)}/${esc(i.unit)}</RATE><DISCOUNT>${p.disc || ''}</DISCOUNT><STARTINGFROM></STARTINGFROM><ENDINGAT></ENDINGAT></PRICELEVELLIST.LIST></FULLPRICELIST.LIST>`).join('')
+          + `</STOCKITEM>`;
       }
     } else if (type === 'Voucher') {
       for (const v of this.s.vouchers) if (keep(v)) {

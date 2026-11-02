@@ -56,7 +56,13 @@ async function boot() {
   }
   S.me = (await db.meta('me')) || { name: S.mode === 'demo' ? 'Demo Salesperson' : 'Not signed in', code: S.mode === 'demo' ? 'DEMO' : 'USER', role: S.mode === 'demo' ? 'admin' : 'sales' };
   S.settings = (await db.meta('settings')) || S.settings;
-  S.sync = new SyncEngine(S.api, () => { loadTxns().then(renderChrome); });
+  S.sync = new SyncEngine(S.api, () => {
+    loadTxns().then((mastersChanged) => {
+      renderChrome();
+      // New customers or balances arrived: refresh list screens, but never a form or a search being typed.
+      if (mastersChanged && ['home', 'parties'].includes(S.view) && !document.activeElement?.matches('input, textarea, select')) render(true);
+    });
+  });
   await S.sync.init();
   await loadMasters();
   await loadTxns();
@@ -92,7 +98,8 @@ async function loadTxns() {
   const s = await db.meta('settings');
   if (s) S.settings = s;
   const lastCursor = await db.meta('mastersCursor');
-  if (lastCursor !== S.mastersCursor) { S.mastersCursor = lastCursor; await loadMasters(); }
+  if (lastCursor !== S.mastersCursor) { S.mastersCursor = lastCursor; await loadMasters(); return true; }
+  return false;
 }
 
 function ctx() { return { settings: S.settings, ledgerByCode: S.ledgerByCode, itemByCode: S.itemByCode }; }
@@ -214,14 +221,16 @@ function formHtml() {
   const editing = !!d.id;
   let body = `<label>Date</label><input type="date" data-f="date" value="${esc(d.date)}">
     <label>${t.party === 'supplier' ? 'Supplier' : 'Customer'}</label>
-    <button class="picker ${party ? '' : 'empty'}" data-act="pickparty">${party ? `<b>${esc(party.name)}</b><span class="s">${esc(party.code)}${party.phone ? ' · ' + esc(party.phone) : ''}${party.trn ? ` · ${tax.taxIdLabel} ${esc(party.trn)}` : ''}</span>` : `Tap to choose ${t.party}`}</button>`;
+    <button class="picker ${party ? '' : 'empty'}" data-act="pickparty">${party ? `<b>${esc(party.name)}</b><span class="s">${esc(party.code)}${party.phone ? ' · ' + esc(party.phone) : ''}${party.trn ? ` · ${tax.taxIdLabel} ${esc(party.trn)}` : ''}</span>` : `Tap to choose ${t.party}`}</button>
+    ${party ? partyInfoHtml(party, d) : ''}`;
   if (d.type === 'so') body += `<label>Delivery date</label><input type="date" data-f="dueDate" value="${esc(d.dueDate || '')}">`;
   if (d.type === 'pi') body += `<label>Supplier invoice no.</label><input data-f="supplierInvNo" value="${esc(d.supplierInvNo || '')}" placeholder="As printed on the supplier's invoice">`;
   if (t.kind === 'items') {
     const c = calcDoc(d.lines, tax);
     body += `<div class="sec">Items</div>` + c.lines.map((l, i) => {
       const it = S.itemByCode.get(l.itemCode) || { name: l.itemCode, unit: '' };
-      return `<div class="line" data-line="${i}"><div class="lh"><b>${esc(it.name)}</b><button class="x" data-act="delline" data-i="${i}" aria-label="Remove">✕</button></div>
+      const short = it.stock != null && d.type !== 'pi' && Number(l.qty) > it.stock;
+      return `<div class="line" data-line="${i}"><div class="lh"><b>${esc(it.name)}</b>${it.stock != null ? `<span class="stk ${short ? 'low' : ''}">Stock ${esc(it.stock)}${short ? ' (not enough)' : ''}</span>` : ''}<button class="x" data-act="delline" data-i="${i}" aria-label="Remove">✕</button></div>
         <div class="grid4"><div><label>Qty (${esc(it.unit)})</label><input inputmode="decimal" data-l="qty" data-i="${i}" value="${esc(l.qty)}"></div>
         <div><label>Rate</label><input inputmode="decimal" data-l="rate" data-i="${i}" value="${esc(l.rate)}" ${S.settings.allowRateEdit ? '' : 'readonly'}></div>
         <div><label>Disc %</label><input inputmode="decimal" data-l="discPct" data-i="${i}" value="${esc(l.discPct || '')}"></div>
@@ -247,6 +256,35 @@ function formHtml() {
     ${editing && d.syncedVersion ? `<div class="card info small">Already in Tally. Saving will update the same Tally voucher at the next sync.</div>` : ''}
     <div class="card">${body}</div><div id="formerr" class="err"></div>
     <div class="savebar"><button class="btn full" data-act="save">Save${isOffline() ? ' (offline)' : ''}</button></div></main>`;
+}
+
+/** Balance, credit limit and overdue amount from Tally (as of the last sync), with warnings. */
+function partyInfoHtml(p, d) {
+  const cur = S.settings.tax.currency;
+  if (p.balance == null && !p.creditLimit) return '';
+  const bal = Number(p.balance) || 0;
+  const sup = p.role === 'supplier';
+  const owes = sup ? (bal < 0 ? `You owe ${money(-bal, cur)}` : bal > 0 ? `Advance ${money(bal, cur)}` : 'Nothing outstanding')
+    : (bal > 0 ? `Owes ${money(bal, cur)}` : bal < 0 ? `Advance ${money(-bal, cur)}` : 'Nothing outstanding');
+  const bits = [`<b>${owes}</b>`];
+  if (p.creditLimit) bits.push(`limit ${money(p.creditLimit, cur)}`);
+  if (p.creditDays) bits.push(`${p.creditDays} days credit`);
+  if (p.priceLevel) bits.push(`${esc(p.priceLevel)} prices`);
+  const warn = [];
+  if (!sup && p.overdue > 0) warn.push(`${money(p.overdue, cur)} overdue${p.overdueDays ? ` (oldest ${p.overdueDays} days past due)` : ''}.`);
+  if (!sup && p.creditLimit && ['si', 'so'].includes(d.type)) {
+    // An invoice already in Tally is already in the balance.
+    const total = d.lines?.length && !d.syncedVersion ? calcDoc(d.lines, S.settings.tax).total : 0;
+    if (bal + total > p.creditLimit) warn.push(`This ${d.type === 'so' ? 'order' : 'invoice'} takes the balance to ${money(bal + total, cur)}, over the credit limit of ${money(p.creditLimit, cur)}.`);
+  }
+  return `<div class="partyinfo ${warn.length ? 'warn' : ''}" id="partyinfo" title="From Tally at the last sync">${bits.join(' · ')}${warn.map((w) => `<div class="pw">⚠ ${w}</div>`).join('')}</div>`;
+}
+
+/** Rate and discount for an item, using the customer's price level when Tally has one for it. */
+function priceFor(it, party, type) {
+  if (type === 'pi') return { rate: it.cost || it.rate, discPct: 0 };
+  const pl = party?.priceLevel && it.priceLevels?.[party.priceLevel];
+  return pl ? { rate: pl.rate, discPct: pl.disc || 0 } : { rate: it.rate, discPct: 0 };
 }
 
 /** True when this phone has no internet, real or simulated in the demo. */
@@ -276,7 +314,13 @@ function updateTotals() {
   if (!$('#t-total')) return;
   const bad = S.draft.lines.some(lineProblem);
   $('#t-taxable').textContent = bad ? '–' : money(c.taxable, cur); $('#t-tax').textContent = bad ? '–' : money(c.tax, cur); $('#t-total').textContent = bad ? '–' : money(c.total, cur);
-  c.lines.forEach((l, i) => { const el = $(`[data-line="${i}"] .lt`); if (el) el.innerHTML = lineTotalHtml(l, cur); });
+  c.lines.forEach((l, i) => {
+    const el = $(`[data-line="${i}"] .lt`); if (el) el.innerHTML = lineTotalHtml(l, cur);
+    const it = S.itemByCode.get(S.draft.lines[i]?.itemCode), stk = $(`[data-line="${i}"] .stk`);
+    if (stk && it?.stock != null && S.draft.type !== 'pi') { const short = Number(S.draft.lines[i].qty) > it.stock; stk.classList.toggle('low', short); stk.textContent = `Stock ${it.stock}${short ? ' (not enough)' : ''}`; }
+  });
+  const party = S.ledgerByCode.get(S.draft.partyCode), pi = $('#partyinfo');
+  if (party && pi) pi.outerHTML = partyInfoHtml(party, S.draft) || '<div id="partyinfo"></div>';
 }
 
 function validate(d) {
@@ -338,7 +382,7 @@ function openPicker(kind, onPick) {
       if (q.every((w) => m._h.includes(w))) { out.push(m); if (out.length >= 60) break; }
     }
     res.innerHTML = out.map((m) => `<button class="row" data-pick="${esc(m.code)}"><span class="main"><span class="p">${esc(m.name)}</span>
-      <span class="s">${esc(m.code)}${kind === 'item' ? ` · ${esc(m.unit)} · ${money(m.rate, S.settings.tax.currency)}${m.stock != null ? ` · stock ${m.stock}` : ''}` : `${m.phone ? ' · ' + esc(m.phone) : ''}${m.trn ? ' · TRN ' + esc(m.trn) : ''}`}</span></span></button>`).join('')
+      <span class="s">${esc(m.code)}${kind === 'item' ? ` · ${esc(m.unit)} · ${money(m.rate, S.settings.tax.currency)}${m.stock != null ? ` · stock ${m.stock}` : ''}` : `${m.phone ? ' · ' + esc(m.phone) : ''}${m.trn ? ' · TRN ' + esc(m.trn) : ''}${m.balance ? ` · ${m.role === 'supplier' ? 'bal.' : 'owes'} ${money(Math.abs(m.balance), S.settings.tax.currency)}` : ''}${m.overdue > 0 ? ' · <b class="od">overdue</b>' : ''}`}</span></span></button>`).join('')
       || `<p class="muted center">No match. ${kind === 'item' ? 'Items' : 'Customers'} are created in Tally and appear here after the next sync.</p>`;
     const ms = performance.now() - t0;
     $('#pcount').textContent = `${src.length.toLocaleString()} on this device · search took ${ms.toFixed(1)} ms`;
@@ -382,7 +426,7 @@ VIEWS.parties = async () => {
   const list = [];
   for (const l of S.ledgers) if (l.role === 'customer' && q.every((w) => l._h.includes(w))) { list.push(l); if (list.length >= 80) break; }
   return `${header('Customers')}<main><input class="search" id="partyq" placeholder="Search name, code, phone or TRN" value="${esc(S.partyQ || '')}" autocomplete="off">
-    <div class="card list">${list.map((l) => `<div class="row static"><span class="main"><span class="p">${esc(l.name)}</span><span class="s">${esc(l.code)}${l.phone ? ' · ' + esc(l.phone) : ''}${l.trn ? ' · TRN ' + esc(l.trn) : ''}</span></span>
+    <div class="card list">${list.map((l) => `<div class="row static"><span class="main"><span class="p">${esc(l.name)}</span><span class="s">${esc(l.code)}${l.phone ? ' · ' + esc(l.phone) : ''}${l.trn ? ' · TRN ' + esc(l.trn) : ''}</span>${l.balance ? `<span class="s"><b>${l.balance > 0 ? 'Owes' : 'Advance'} ${money(Math.abs(l.balance), S.settings.tax.currency)}</b>${l.overdue > 0 ? ` · <b class="od">${money(l.overdue, S.settings.tax.currency)} overdue</b>` : ''}</span>` : ''}</span>
       <span class="a"><button class="btn sm" data-go="new/si/${esc(l.code)}">Invoice</button> <button class="btn sm ghost" data-go="new/rc/${esc(l.code)}">Receipt</button></span></div>`).join('') || '<p class="muted">No customers on this device yet.</p>'}</div>
     <p class="muted small">Customers and items are maintained in Tally. Codes stay the same when a name changes in Tally.</p></main>`;
 };
@@ -646,11 +690,23 @@ document.addEventListener('click', async (e) => {
   const act = a.dataset.act;
   try {
     if (act === 'syncnow') { const r = await S.sync.syncNow({ manual: true }); toast(r?.error ? (isOffline() ? 'You are offline. Everything is saved on this device.' : 'Sync problem: ' + r.error) : 'Synced with the server'); await loadMasters(); render(true); }
-    else if (act === 'pickparty') openPicker(TYPES[S.draft.type].party, (code) => { S.draft.partyCode = code; render(true); });
+    else if (act === 'pickparty') openPicker(TYPES[S.draft.type].party, (code) => {
+      const before = S.ledgerByCode.get(S.draft.partyCode);
+      S.draft.partyCode = code;
+      // Lines still at the old customer's price move to the new customer's price level.
+      const party = S.ledgerByCode.get(code);
+      for (const l of S.draft.lines || []) {
+        const it = S.itemByCode.get(l.itemCode);
+        if (!it) continue;
+        const old = priceFor(it, before, S.draft.type);
+        if (Number(l.rate) === old.rate && (Number(l.discPct) || 0) === old.discPct) Object.assign(l, priceFor(it, party, S.draft.type));
+      }
+      render(true);
+    });
     else if (act === 'additem') openPicker('item', (code) => {
       const it = S.itemByCode.get(code);
       const taxCode = S.settings.tax.rates.some((r) => r.code === it.taxCode) ? it.taxCode : S.settings.tax.defaultRateCode;
-      S.draft.lines.push({ itemCode: code, qty: 1, rate: S.draft.type === 'pi' ? it.cost || it.rate : it.rate, discPct: 0, taxCode });
+      S.draft.lines.push({ itemCode: code, qty: 1, ...priceFor(it, S.ledgerByCode.get(S.draft.partyCode), S.draft.type), taxCode });
       render(true).then(() => { const q = document.querySelectorAll('[data-l="qty"]'); const el = q[q.length - 1]; el?.focus(); el?.select(); });
     });
     else if (act === 'delline') { S.draft.lines.splice(Number(a.dataset.i), 1); render(true); }
