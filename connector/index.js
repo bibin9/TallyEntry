@@ -22,6 +22,8 @@ if (!fs.existsSync(cfgPath)) {
   process.exit(1);
 }
 const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8').replace(/^\uFEFF/, '')); // Notepad may add a BOM
+// The cloud is only served over HTTPS; a typed http:// address would fail with "fetch failed".
+if (/^http:\/\//i.test(cfg.relayUrl || '') && !/^http:\/\/(localhost|127\.|\[::1\])/i.test(cfg.relayUrl)) cfg.relayUrl = 'https://' + cfg.relayUrl.slice(7);
 const near = (f) => path.resolve(path.dirname(cfgPath), f);
 // Key order: environment variable, then a key file (the Windows installer writes one that only
 // SYSTEM and Administrators can read), then the config file (least preferred).

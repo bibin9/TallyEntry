@@ -118,6 +118,10 @@ if ($RelayUrl) { $cfg.relayUrl = $RelayUrl }
 if ($PSBoundParameters.ContainsKey('TallyUrl')) { $cfg.tallyUrl = $TallyUrl }
 while (-not $cfg.tallyCompany) { $cfg.tallyCompany = (Read-Host 'Company name exactly as shown in TallyPrime').Trim() }
 while (-not ($cfg.relayUrl -match '^https?://')) { $cfg.relayUrl = (Read-Host 'App address, for example https://quickentry.pages.dev').Trim().TrimEnd('/') }
+if ($cfg.relayUrl -match '^http://' -and $cfg.relayUrl -notmatch '^http://(localhost|127\.)') {
+  $cfg.relayUrl = 'https://' + $cfg.relayUrl.Substring(7)
+  Ok "App address changed to $($cfg.relayUrl) (the cloud only works over https)"
+}
 WriteText $cfgPath ($cfg | ConvertTo-Json)
 Ok "Settings saved to $cfgPath"
 
