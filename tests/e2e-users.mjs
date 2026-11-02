@@ -151,7 +151,7 @@ if (process.env.QE_PG_URL) {
   check(!(await ph.isVisible('#modebar')), 'Signed in to live mode (no demo banner)');
   check(await ph.isVisible('#topsignout'), 'Live mode shows Sign out in the top bar');
   await ph.screenshot({ path: `${OUT}/topbar-live.png`, clip: { x: 0, y: 0, width: 390, height: 120 } });
-  await ph.goto(url + '/#more'); await ph.waitForSelector('text=Sign out');
+  await ph.goto(url + '/#more'); await ph.waitForSelector('#view >> text=Sign out');
   check((await ph.textContent('#view')).includes(id), 'More shows the company ID of the signed-in person');
   await ph.goto(url + '/#synccheck'); await ph.waitForSelector('#verdict');
   check(/office PC is not sending/.test(await ph.textContent('#verdict')), 'Sync check warns when the office PC has never connected');
