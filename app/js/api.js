@@ -14,7 +14,7 @@ export class HttpApi {
     try {
       r = await fetch(this.base + path, {
         method, cache: 'no-store',
-        headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json' },
+        headers: { ...(this.token ? { Authorization: 'Bearer ' + this.token } : {}), 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (e) { throw new NetworkError('Cannot reach the QuickEntry server'); }
@@ -36,4 +36,13 @@ export class HttpApi {
   addUser(u) { return this._call('POST', '/api/users', u); }
   updateUser(u) { return this._call('POST', '/api/users/update', u); }
   resetUserKey(id) { return this._call('POST', '/api/users/resetkey', { id }); }
+  setPassword(id, password) { return this._call('POST', '/api/users/password', { id, password }); }
+  archive(q) { return this._call('GET', '/api/archive?q=' + encodeURIComponent(q || '')); }
+  syncCheck() { return this._call('GET', '/api/sync-check'); }
+  logout() { return this._call('POST', '/api/logout', {}); }
+  /** Company ID + user code + password -> { key, user }. Needs no key, so it is static. */
+  static async login(baseUrl, company, code, password) {
+    const api = new HttpApi(baseUrl, '');
+    return api._call('POST', '/api/login', { company, code, password });
+  }
 }

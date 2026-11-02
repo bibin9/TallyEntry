@@ -85,3 +85,8 @@ nav.tabs a.plus{flex:none;width:52px;height:52px;margin-top:-18px;border-radius:
 .urow .btns{margin-top:6px}.keycard{border:2px solid var(--green)}
 code.key{display:block;font-size:15px;word-break:break-all;background:#f3f6fb;border-radius:8px;padding:10px;margin:8px 0;user-select:all}
 a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+
+.card.good{background:#e3f6ec;border:1px solid #b5e3c8}.card.bad{background:#fde3e3;border:1px solid #f3b9b9}
+.signin-page .brand{text-align:center;margin:28px 0 12px}.signin-page .brand h1{margin:0;color:var(--blue,#1a56c4);font-size:28px}
+.card.signin details{margin-top:14px}.card.signin summary{cursor:pointer;color:var(--mute)}
+.logindet td{padding:4px 8px}

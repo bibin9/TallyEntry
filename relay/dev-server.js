@@ -41,7 +41,7 @@ if (!fs.existsSync(CONFIG)) {
   console.log(`Created ${CONFIG} with new random keys. Keep this file private.`);
 }
 const config = JSON.parse(fs.readFileSync(CONFIG, 'utf8'));
-const auth = { users: {}, connectors: {} };
+const auth = { users: {}, connectors: {}, sessions: config.sessions || {} };
 // Users added or changed in the app (More > Users) are written back to the config file.
 auth.save = () => {
   for (const [tid, t] of Object.entries(config.tenants)) {
@@ -50,6 +50,7 @@ auth.save = () => {
       return { ...rest, token };
     });
   }
+  config.sessions = auth.sessions || {};
   const tmp = CONFIG + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
   fs.renameSync(tmp, CONFIG);

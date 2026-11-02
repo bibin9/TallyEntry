@@ -1,6 +1,6 @@
 // HTTP routing for the relay, independent of the HTTP server used.
 // auth: { users: token -> {tenant, id, name, code, role, active}, connectors: key -> tenant, save?() }
-import { usersOp } from './users-core.js';
+import { usersOp, loginOp, userForToken } from './users-core.js';
 
 export async function handleApi(core, auth, { method, path, query = {}, body = {}, token }) {
   const ok = (data) => ({ status: 200, data });
@@ -20,10 +20,23 @@ export async function handleApi(core, auth, { method, path, query = {}, body = {
   }
 
   if (path.startsWith('/api/owner/')) return err(404, 'Owner screens need the Cloudflare + Supabase setup');
-  const user = auth.users[token];
+  auth.sessions ||= {};
+  if (method === 'POST' && path === '/api/login') {
+    const r = await loginOp(auth.users, auth.sessions, body);
+    await auth.save?.();
+    return r.ok ? ok(r) : err(r.locked ? 429 : 401, r.error);
+  }
+  const user = userForToken(auth.users, auth.sessions, token);
   if (!user || user.active === false) return err(401, 'Please sign in again');
   const tid = user.tenant;
   switch (`${method} ${path}`) {
+    case 'POST /api/logout': if (auth.sessions[token]) { delete auth.sessions[token]; await auth.save?.(); } return ok({ ok: true });
+    case 'GET /api/archive':
+      if (user.role !== 'admin') return err(403, 'Only an office admin can open the archive');
+      return ok(await core.getArchive(tid, query.q));
+    case 'GET /api/sync-check':
+      if (user.role !== 'admin') return err(403, 'Only an office admin can see the sync check');
+      return ok(await core.getSummary(tid, Object.fromEntries(Object.values(auth.users).map((u) => [u.id, u.name]))));
     case 'GET /api/me': return ok({ id: user.id, name: user.name, code: user.code, role: user.role, tenant: tid });
     case 'GET /api/settings': return ok(await core.getSettings(tid));
     case 'PUT /api/settings':
@@ -38,11 +51,11 @@ export async function handleApi(core, auth, { method, path, query = {}, body = {
       return ok(await core.resolveConflict(tid, body.id, body.choice));
     case 'GET /api/log': return ok(await core.getLog(tid));
     case 'GET /api/connector-status': return ok(await core.connectorStatus(tid));
-    case 'GET /api/users': case 'POST /api/users': case 'POST /api/users/update': case 'POST /api/users/resetkey': {
+    case 'GET /api/users': case 'POST /api/users': case 'POST /api/users/update': case 'POST /api/users/resetkey': case 'POST /api/users/password': {
       if (user.role !== 'admin') return err(403, 'Only an office admin can manage users');
-      const op = { 'GET /api/users': 'users.list', 'POST /api/users': 'users.add', 'POST /api/users/update': 'users.update', 'POST /api/users/resetkey': 'users.resetkey' }[`${method} ${path}`];
+      const op = { 'GET /api/users': 'users.list', 'POST /api/users': 'users.add', 'POST /api/users/update': 'users.update', 'POST /api/users/resetkey': 'users.resetkey', 'POST /api/users/password': 'users.setpassword' }[`${method} ${path}`];
       try {
-        const r = usersOp(auth.users, tid, user.id, op, body);
+        const r = await usersOp(auth.users, tid, user.id, op, body, auth.sessions);
         if (op !== 'users.list') await auth.save?.();
         return ok(r);
       } catch (e) { if (e.status) return err(e.status, e.message); throw e; }

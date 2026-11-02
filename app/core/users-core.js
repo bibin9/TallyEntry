@@ -1,5 +1,6 @@
 // User management for the self-hosted server and demo mode. Same rules as qe_users() in
-// relay/supabase/schema.sql. `users` maps sign-in key -> { id, tenant, name, code, role, active }.
+// relay/supabase/schema.sql. `users` maps sign-in key -> { id, tenant, name, code, role, active, pw? }.
+// `sessions` (optional) maps a password sign-in's session key -> user id.
 
 export class UserError extends Error { constructor(m) { super(m); this.status = 400; } }
 
@@ -11,10 +12,56 @@ export function newKey() {
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-const pub = (u) => ({ id: u.id, name: u.name, code: u.code, role: u.role, active: u.active !== false });
+const pub = (u) => ({ id: u.id, name: u.name, code: u.code, role: u.role, active: u.active !== false, hasPassword: !!u.pw });
+const BAD_LOGIN = 'Wrong company ID, user code or password';
+const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
+
+async function pbkdf2(password, saltHex, iter) {
+  const salt = new Uint8Array(saltHex.match(/../g).map((h) => parseInt(h, 16)));
+  const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, k, 256));
+}
+export async function hashPassword(password) {
+  const salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+  return { salt, iter: 100000, hash: await pbkdf2(password, salt, 100000) };
+}
+
+/** Find the user for a bearer key: a sign-in key, or a session key from a password sign-in. */
+export function userForToken(users, sessions, token) {
+  if (users[token]) return users[token];
+  const id = sessions?.[token];
+  return id ? Object.values(users).find((u) => u.id === id) : undefined;
+}
+
+/** Company ID + user code + password -> { ok, key, user } or { ok:false, error, locked? }. 5 wrong tries lock for 15 minutes. */
+export async function loginOp(users, sessions, body = {}, now = Date.now()) {
+  const tid = String(body.company || '').trim().toLowerCase(), code = String(body.code || '').trim().toUpperCase();
+  const u = Object.values(users).find((x) => x.tenant === tid && x.code === code);
+  if (!u || !u.pw || u.active === false) { await pbkdf2(String(body.password || ''), '00', 100000); return { ok: false, error: BAD_LOGIN }; }
+  if (u.lockedUntil > now) {
+    const m = Math.max(1, Math.ceil((u.lockedUntil - now) / 60000));
+    return { ok: false, locked: true, error: `Too many wrong tries. Try again in ${m} minute${m === 1 ? '' : 's'}, or ask your office admin to reset your password.` };
+  }
+  const right = (await pbkdf2(String(body.password || ''), u.pw.salt, u.pw.iter)) === u.pw.hash;
+  if (u.lockedUntil > Date.now()) return { ok: false, locked: true, error: 'Too many wrong tries. Try again in 15 minutes, or ask your office admin to reset your password.' }; // locked while checking
+  if (!right) {
+    u.pwFailed = (u.pwFailed || 0) + 1;
+    if (u.pwFailed >= 5) {
+      u.pwFailed = 0; u.lockedUntil = now + 15 * 60000;
+      return { ok: false, locked: true, error: 'Too many wrong tries. Try again in 15 minutes, or ask your office admin to reset your password.' };
+    }
+    return { ok: false, error: BAD_LOGIN };
+  }
+  u.pwFailed = 0; delete u.lockedUntil;
+  const key = newKey();
+  sessions[key] = u.id;
+  return { ok: true, key, user: { id: u.id, name: u.name, code: u.code, role: u.role, tenant: u.tenant } };
+}
+
+const endSessions = (sessions, id) => { for (const [k, v] of Object.entries(sessions || {})) if (v === id) delete sessions[k]; };
 
 /** callerId: the signed-in admin's id, or null for the owner. Returns the API result. */
-export function usersOp(users, tid, callerId, op, body = {}) {
+export async function usersOp(users, tid, callerId, op, body = {}, sessions = {}) {
   const mine = () => Object.entries(users).filter(([, u]) => u.tenant === tid);
   if (op === 'users.list') {
     return mine().map(([, u]) => pub(u)).sort((a, b) => (b.active - a.active) || a.name.localeCompare(b.name));
@@ -47,7 +94,15 @@ export function usersOp(users, tid, callerId, op, body = {}) {
     const key = newKey();
     delete users[oldKey];
     users[key] = u;
+    endSessions(sessions, u.id);
     return { id: u.id, key };
+  }
+  if (op === 'users.setpassword') {
+    const pw = String(body.password || '');
+    if (pw.length < 6 || pw.length > 72) throw new UserError('Password must be 6 to 72 characters');
+    u.pw = await hashPassword(pw); u.pwFailed = 0; delete u.lockedUntil;
+    endSessions(sessions, u.id);
+    return { id: u.id, company: tid, code: u.code, hasPassword: true };
   }
   throw new UserError('Unknown operation');
 }

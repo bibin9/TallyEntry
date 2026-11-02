@@ -57,7 +57,10 @@ async function boot() {
     S.prefillToken = decodeURIComponent(location.hash.slice('#connect='.length));
     history.replaceState(null, '', location.pathname + '#more');
     setTimeout(() => toast('Sign-in key filled in. Tap "Use live mode".'), 300);
+    S.prefillToken && (S.keyOpen = true);
   }
+  // First time on this phone: start at the sign-in screen (the demo is one tap away).
+  if (!(await db.meta('mode')) && !location.hash.replace('#', '')) history.replaceState(null, '', location.pathname + '#signin');
   window.addEventListener('hashchange', route);
   route();
   S.sync.start();
@@ -103,7 +106,9 @@ async function renderChrome() {
   $('#modebar').innerHTML = S.mode === 'demo'
     ? `<b>DEMO</b> Sample data and a simulated Tally in this browser. Not connected to a real Tally. <a href="#more">Settings</a>`
     : '';
-  $('#modebar').hidden = S.mode !== 'demo';
+  const signedOut = S.mode === 'live' && /sign in again/i.test(S.sync.lastError || '');
+  if (signedOut) $('#modebar').innerHTML = `<b>Signed out</b> Your password or key was changed. <a href="#signin">Sign in again</a>`;
+  $('#modebar').hidden = S.mode !== 'demo' && !signedOut;
   if (['home', 'list', 'detail', 'sync'].includes(S.view) && !document.activeElement?.matches('input,select,textarea')) render(true);
 }
 
@@ -349,17 +354,81 @@ VIEWS.more = async () => {
       <p class="small muted">Office connector: ${cs?.lastSeen ? `last seen ${ago(cs.lastSeen)}${cs.tallyOk === false ? ', Tally not reachable' : ''}` : 'not seen yet'}</p>
       <button class="btn ghost full" data-go="log">Sync log</button></div>
     ${S.mode === 'demo' ? await demoPanel() : ''}
-    <div class="card"><div class="sec">Connection</div>
-      <p class="small">Live mode connects to your QuickEntry server, which relays to the connector on the office Tally PC. The sign-in key comes from your office admin.</p>
-      <label>Server address</label><input id="c-url" value="${esc(conn.url || '')}" placeholder="Leave empty if the app is opened from your QuickEntry address">
-      <label>Sign-in key</label><input id="c-token" type="password" value="${esc(S.prefillToken || conn.token || '')}" autocomplete="off">
-      <div class="btns"><button class="btn" data-act="golive">Use live mode</button>${S.mode === 'live' ? '<button class="btn ghost" data-act="godemo">Switch to demo</button>' : ''}</div>
-      <p class="small muted">Switching mode clears transactions on this device after confirming none are unsynced.</p></div>
+    ${await signInCard(conn)}
     <div class="card"><div class="sec">${esc(tax.taxLabel)} and documents</div>
       <p class="small">Rates: ${tax.rates.map((r) => `${esc(r.label)}`).join(', ')} · Prices ${tax.pricesIncludeTax ? 'include' : 'exclude'} ${esc(tax.taxLabel)} · Rounding per ${tax.rounding === 'line' ? 'line' : 'document'} · ${esc(tax.currency)}</p>
-      ${S.me.role === 'admin' ? `<div class="btns"><button class="btn ghost" data-go="taxsettings">${esc(tax.taxLabel)} settings</button><button class="btn ghost" data-go="company">Company and documents</button><button class="btn ghost" data-go="ledgermap">Tally ledger names</button><button class="btn ghost" data-go="users">Users and sign-in keys</button></div>` : '<p class="small muted">Set by the office admin.</p>'}</div>
+      ${S.me.role === 'admin' ? `<div class="btns"><button class="btn ghost" data-go="taxsettings">${esc(tax.taxLabel)} settings</button><button class="btn ghost" data-go="company">Company and documents</button><button class="btn ghost" data-go="ledgermap">Tally ledger names</button><button class="btn ghost" data-go="users">Users and passwords</button><button class="btn ghost" data-go="archive">Archive</button></div>
+      <button class="btn full" data-go="synccheck" style="margin-top:8px">Tally sync check</button>` : '<p class="small muted">Set by the office admin.</p>'}</div>
     <div class="card small muted">QuickEntry for Tally 0.1. Data on this device: ${S.ledgers.length.toLocaleString()} ledgers, ${S.items.length.toLocaleString()} items, ${S.txns.length} transactions.</div>
   </main>`;
+};
+
+/** Company ID + user code + password, with the older sign-in key under "more options". */
+async function signInCard(conn = {}, full = false) {
+  const last = (await db.meta('lastLogin')) || {};
+  if (S.mode === 'live' && !full) {
+    return `<div class="card"><div class="sec">Account</div>
+      <p>Company ID <b>${esc(S.me.tenant || '')}</b> · User code <b>${esc(S.me.code)}</b></p>
+      <div class="btns"><button class="btn ghost" data-act="signout">Sign out</button></div>
+      <p class="small muted">Signing out removes this company's data from this phone, after checking nothing is waiting to sync.</p></div>`;
+  }
+  return `<div class="card signin"><div class="sec">Sign in</div>
+    <p class="small">Your office admin gives you these three details.</p>
+    <label>Company ID</label><input id="li-co" value="${esc(last.company || '')}" autocapitalize="none" autocomplete="organization" spellcheck="false" placeholder="for example al-noor">
+    <label>User code</label><input id="li-code" value="${esc(last.code || '')}" autocapitalize="characters" autocomplete="username" spellcheck="false" placeholder="for example AHM">
+    <label>Password</label><div class="inline"><input id="li-pw" type="password" autocomplete="current-password"><button class="btn sm ghost" data-act="showpw" aria-label="Show password">Show</button></div>
+    <div id="lierr" class="err" role="alert"></div>
+    <button class="btn full" data-act="signin">Sign in</button>
+    <details ${S.keyOpen ? 'open' : ''}><summary class="small">Other ways to sign in</summary>
+      <label>Sign-in key (from a WhatsApp link)</label><input id="c-token" type="password" value="${esc(S.prefillToken || conn.token || '')}" autocomplete="off">
+      <label>Server address</label><input id="c-url" value="${esc(conn.url || '')}" placeholder="Leave empty if the app is opened from your QuickEntry address">
+      <div class="btns"><button class="btn ghost" data-act="golive">Use live mode</button></div>
+    </details>
+    ${S.mode === 'demo' ? '' : '<div class="btns"><button class="btn ghost" data-act="godemo">Switch to demo</button></div>'}</div>`;
+}
+
+VIEWS.signin = async () => {
+  const conn = (await db.meta('connection')) || {};
+  return `<main class="form signin-page"><div class="brand"><h1>QuickEntry</h1><p class="muted">Sales entry for TallyPrime</p></div>
+    ${await signInCard(conn, true)}
+    ${S.mode === 'demo' ? `<p class="center small"><button class="link" data-act="trydemo">Just looking? Try the demo with sample data</button></p>` : ''}</main>`;
+};
+
+VIEWS.synccheck = async () => {
+  if (S.me.role !== 'admin') return `${header('Tally sync check', 'more')}<main><p class="muted">Only an office admin can open this.</p></main>`;
+  let r, problem = '';
+  try { r = await S.api.syncCheck(); } catch (e) { problem = e instanceof NetworkError ? 'The sync check needs an internet connection.' : e.message; }
+  if (problem) return `${header('Tally sync check', 'more')}<main><div class="card bad">${esc(problem)}</div></main>`;
+  const c = r.counts, seen = r.connector.lastSeen ? Date.now() - Date.parse(r.connector.lastSeen) : Infinity;
+  const pcOk = seen < 5 * 60000 && r.connector.tallyOk !== false;
+  const stuck = r.oldestWaiting && Date.now() - Date.parse(r.oldestWaiting) > 3600000;
+  const allGood = pcOk && !c.queued && !c.failed && !c.conflict;
+  const title = !pcOk ? 'The office PC is not sending to Tally.' : c.failed || c.conflict ? 'Some entries need attention.' : stuck ? 'Entries have been waiting for over an hour.' : 'Entries are on their way to Tally.';
+  const verdict = allGood ? `<div class="card good" id="verdict"><b>Everything is in Tally.</b> No entries are waiting, failed or in conflict.</div>`
+    : `<div class="card ${c.failed || c.conflict || stuck || !pcOk ? 'bad' : 'warn'}" id="verdict"><b>${title}</b>
+      ${!pcOk ? `<p class="small">${r.connector.lastSeen ? `Last seen ${ago(r.connector.lastSeen)}` : 'Never seen'}${r.connector.tallyOk === false ? ', and it could not reach TallyPrime' : ''}. Check the office PC is on, connected to the internet, and TallyPrime is open with the company loaded.</p>` : ''}</div>`;
+  const row = (x) => `<div class="row static"><span class="main"><span class="p">${esc(x.number || '')} · ${esc(x.party || x.partyCode || '')}</span>
+    <span class="s">${badge({ status: x.status === 'queued' ? 'sent' : x.status })} by ${esc(x.createdBy || '?')} · received ${ago(x.receivedAt)}${x.error ? ' · ' + esc(x.error) : ''}${x.conflict ? ' · ' + esc(x.conflict) : ''}</span></span></div>`;
+  return `${header('Tally sync check', 'more')}<main>${verdict}
+    <div class="card"><table class="tbl"><tr><td>Waiting for Tally</td><td class="r"><b>${c.queued}</b></td></tr><tr><td>Failed</td><td class="r"><b>${c.failed}</b></td></tr>
+      <tr><td>Conflict</td><td class="r"><b>${c.conflict}</b></td></tr><tr><td>In Tally (not archived yet)</td><td class="r">${c.synced}</td></tr><tr><td>Archived</td><td class="r">${c.archived}</td></tr></table>
+      <p class="small muted">Office PC: ${r.connector.lastSeen ? 'last seen ' + ago(r.connector.lastSeen) : 'not seen yet'}${r.oldestWaiting ? ` · oldest waiting entry received ${ago(r.oldestWaiting)}` : ''}. An entry made on a phone with no internet shows here once that phone syncs; the phone itself shows it as Pending.</p></div>
+    ${r.attention.length ? `<div class="card list"><div class="sec">Needs attention</div>${r.attention.map(row).join('')}</div>` : ''}
+    <div class="btns"><button class="btn ghost" data-act="refreshcheck">Check again</button></div></main>`;
+};
+
+VIEWS.archive = async () => {
+  if (S.me.role !== 'admin') return `${header('Archive', 'more')}<main><p class="muted">Only an office admin can open the archive.</p></main>`;
+  let list, problem = '';
+  try { list = await S.api.archive(S.archQ || ''); } catch (e) { problem = e instanceof NetworkError ? 'The archive needs an internet connection.' : e.message; }
+  const s = S.settings;
+  return `${header('Archive', 'more')}<main>
+    <p class="small muted">Entries already in Tally move here after ${esc(s.serverActiveDays ?? 7)} days and are deleted ${esc(s.archiveDays ?? 30)} days later. Change this in Company and documents.</p>
+    <input class="search" id="archq" placeholder="Search number or customer" value="${esc(S.archQ || '')}" autocomplete="off">
+    ${problem ? `<div class="card err">${esc(problem)}</div>` : `<div class="card list">${(list || []).map((x) => `<div class="row static"><span class="tag t-${esc(x.type)}">${TYPES[x.type]?.icon || ''}</span>
+      <span class="main"><span class="p">${esc(x.party || x.partyCode || '')}</span><span class="s">${esc(x.number || '')} · ${fdate(x.date)}${x.voucherNo ? ' · Tally ' + esc(x.voucherNo) : ''} · deleted on ${fdate(x.deleteOn)}</span></span>
+      <span class="a">${money(Number(x.total) || 0, s.tax.currency)}</span></div>`).join('') || '<p class="muted">Nothing in the archive yet.</p>'}</div>
+      ${list?.length >= 200 ? '<p class="small muted">Showing the newest 200. Search to find older ones.</p>' : ''}`}</main>`;
 };
 
 async function demoPanel() {
@@ -404,6 +473,10 @@ VIEWS.company = async () => {
     <label>Footer note on documents (optional)</label><input id="co-foot" value="${esc(c.footer || '')}" placeholder="For example bank details or terms">
     <div class="sec" style="margin-top:18px">On the devices</div>
     <label>Keep synced transactions on phones for (days)</label><input id="co-ret" inputmode="numeric" value="${esc(S.settings.retentionDays)}">
+    <div class="sec" style="margin-top:18px">Keeping data on the server</div>
+    <p class="small muted">Only entries already in Tally are archived or deleted. Anything still waiting, failed or in conflict is always kept.</p>
+    <label>Keep entries active for (days)</label><input id="co-active" inputmode="numeric" value="${esc(S.settings.serverActiveDays ?? 7)}">
+    <label>Then keep them in the archive for (days, 0 = delete straight away)</label><input id="co-arch" inputmode="numeric" value="${esc(S.settings.archiveDays ?? 30)}">
     <label class="tg"><input type="checkbox" id="co-rate" ${S.settings.allowRateEdit ? 'checked' : ''}> Salespeople may change item rates</label>
     <label>Receipt modes (one per line)</label><textarea id="co-modes" rows="4">${esc(S.settings.receiptModes.join('\n'))}</textarea>
   </div><div id="formerr" class="err"></div><button class="btn full" data-act="savecompany">Save for all users</button></main>`;
@@ -428,29 +501,47 @@ VIEWS.ledgermap = async () => {
 VIEWS.users = async () => {
   let list, problem = '';
   try { list = await S.api.users(); } catch (e) { problem = e instanceof NetworkError ? 'Managing users needs an internet connection.' : e.message; }
-  const k = S.newKey;
-  S.newKey = null; // a key is shown once
+  const k = S.newKey, lg = S.newLogin;
+  S.newKey = null; S.newLogin = null; // shown once
   const keyCard = k ? `<div class="card keycard"><div class="sec">Sign-in key for ${esc(k.name)}</div>
       <p class="small">Shown only now. Send it to ${esc(k.name)} privately. On their phone: open the link, then tap <b>Use live mode</b>.</p>
       <code class="key" id="newkey">${esc(k.key)}</code>
       <div class="btns"><button class="btn sm" data-act="copykey" data-k="${esc(k.key)}">Copy key</button>
       <a class="btn sm wa" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(keyMessage(k))}">Send by WhatsApp</a></div></div>` : '';
+  const loginCard = lg ? `<div class="card keycard"><div class="sec">Sign-in details for ${esc(lg.name)}</div>
+      <p class="small">Shown only now. Send them to ${esc(lg.name)} privately.</p>
+      <table class="tbl logindet"><tr><td>Company ID</td><td><b>${esc(lg.company)}</b></td></tr><tr><td>User code</td><td><b>${esc(lg.code)}</b></td></tr><tr><td>Password</td><td><b>${esc(lg.password)}</b></td></tr></table>
+      <div class="btns"><button class="btn sm" data-act="copykey" data-k="${esc(loginMessage(lg))}">Copy</button>
+      <a class="btn sm wa" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(loginMessage(lg))}">Send by WhatsApp</a></div></div>` : '';
   const rows = (list || []).map((u) => {
     const self = u.id === S.me.id;
-    return `<div class="urow ${u.active ? '' : 'off'}"><div><b>${esc(u.name)}</b> <span class="muted small">${esc(u.code)} · ${u.role === 'admin' ? 'Office admin' : 'Sales'}${u.active ? '' : ' · switched off'}${self ? ' · you' : ''}</span></div>
-      <div class="btns"><button class="btn sm ghost" data-act="userkey" data-id="${esc(u.id)}" data-name="${esc(u.name)}">New key</button>
+    return `<div class="urow ${u.active ? '' : 'off'}"><div><b>${esc(u.name)}</b> <span class="muted small">${esc(u.code)} · ${u.role === 'admin' ? 'Office admin' : 'Sales'}${u.hasPassword ? ' · password set' : ' · no password yet'}${u.active ? '' : ' · switched off'}${self ? ' · you' : ''}</span></div>
+      <div class="btns"><button class="btn sm" data-act="userpw" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-code="${esc(u.code)}">${u.hasPassword ? 'Reset password' : 'Set password'}</button>
+      <button class="btn sm ghost" data-act="userkey" data-id="${esc(u.id)}" data-name="${esc(u.name)}">New key</button>
       ${self ? '' : `<button class="btn sm ghost" data-act="userrole" data-id="${esc(u.id)}" data-role="${u.role === 'admin' ? 'sales' : 'admin'}">Make ${u.role === 'admin' ? 'sales' : 'admin'}</button>
       <button class="btn sm ghost" data-act="usertoggle" data-id="${esc(u.id)}" data-on="${u.active ? 0 : 1}">${u.active ? 'Switch off' : 'Switch on'}</button>`}</div></div>`;
   }).join('');
-  return `${header('Users and sign-in keys', 'more')}<main class="form">${keyCard}
-    ${problem ? `<div class="card err">${esc(problem)}</div>` : `<div class="card"><div class="sec">People in ${esc(S.settings.company.name)}</div>${rows || '<p class="muted">No users.</p>'}
-      <p class="small muted">"New key" signs the person out of their old key at once, for a lost phone or a leaver. "Switch off" blocks sign-in until switched on.</p></div>
+  return `${header('Users and passwords', 'more')}<main class="form">${loginCard}${keyCard}
+    ${problem ? `<div class="card err">${esc(problem)}</div>` : `<div class="card"><div class="sec">People in ${esc(S.settings.company.name)}</div>
+      ${S.me.tenant ? `<p class="small">Company ID: <b>${esc(S.me.tenant)}</b></p>` : ''}${rows || '<p class="muted">No users.</p>'}
+      <p class="small muted">People sign in with the Company ID, their user code and a password. "Reset password" or "New key" signs the person out of every phone at once, for a lost phone or a leaver. "Switch off" blocks sign-in until switched on.</p></div>
     <div class="card"><div class="sec">Add a person</div>
       <label>Name</label><input id="nu-name" autocomplete="off">
       <label>Code (2 to 6 letters, used in document numbers, for example SI-AHM-0001)</label><input id="nu-code" maxlength="6" autocapitalize="characters" autocomplete="off">
       <label>Role</label><select id="nu-role"><option value="sales">Sales: create entries</option><option value="admin">Office admin: also settings, users and conflicts</option></select>
-      <div id="formerr" class="err"></div><button class="btn full" data-act="useradd">Add and create key</button></div>`}</main>`;
+      <label>Password (at least 6 characters)</label><div class="inline"><input id="nu-pw" autocomplete="new-password" value="${esc(suggestPassword())}"><button class="btn sm ghost" data-act="newpw">New</button></div>
+      <div id="formerr" class="err"></div><button class="btn full" data-act="useradd">Add person</button></div>`}</main>`;
 };
+
+/** Easy to read out and type on a phone: no 0/O or 1/l/I. */
+function suggestPassword() {
+  const a = 'abcdefghjkmnpqrstuvwxyz', d = '23456789', r = crypto.getRandomValues(new Uint32Array(8));
+  return [...r].map((x, i) => (i < 5 ? a : d)[x % (i < 5 ? a : d).length]).join('');
+}
+
+function loginMessage(lg) {
+  return `QuickEntry sign-in for ${lg.name}\nOpen ${location.origin} on your phone and sign in with:\nCompany ID: ${lg.company}\nUser code: ${lg.code}\nPassword: ${lg.password}\nKeep this message private.`;
+}
 
 function keyMessage(k) {
   return `QuickEntry sign-in for ${k.name}\nOpen this link on your phone, then tap "Use live mode":\n${location.origin}/#connect=${k.key}\nKeep this message private.`;
@@ -535,9 +626,32 @@ document.addEventListener('click', async (e) => {
       const t = await db.get('txns', a.dataset.id); t.status = 'sent'; t.conflict = null; await db.put('txns', t);
       toast('Decision sent'); setTimeout(() => S.sync.syncNow(), 600); render(true);
     } else if (act === 'golive' || act === 'godemo') await switchMode(act === 'golive' ? 'live' : 'demo');
-    else if (act === 'useradd') {
+    else if (act === 'signin') await signIn(a);
+    else if (act === 'showpw') { const i = $('#li-pw'); i.type = i.type === 'password' ? 'text' : 'password'; a.textContent = i.type === 'password' ? 'Show' : 'Hide'; }
+    else if (act === 'trydemo') { await db.meta('mode', 'demo'); go('home'); }
+    else if (act === 'signout') {
+      const unsynced = (await db.all('txns')).filter((t) => t.status === 'pending');
+      if (unsynced.length) return toast(`${unsynced.length} entr${unsynced.length === 1 ? 'y has' : 'ies have'} not reached the server yet. Connect to the internet and sync first.`);
+      if (!confirm('Sign out of this phone?')) return;
+      await S.api.logout?.().catch(() => {});
+      await resetDevice('demo', { connection: null });
+    } else if (act === 'refreshcheck') render(true);
+    else if (act === 'newpw') $('#nu-pw').value = suggestPassword();
+    else if (act === 'userpw') {
+      const pw = prompt(`New password for ${a.dataset.name} (at least 6 characters). They are signed out of every phone and sign in again with it.`, suggestPassword());
+      if (pw === null) return;
+      const r = await S.api.setPassword(a.dataset.id, pw.trim());
+      S.newLogin = { name: a.dataset.name, company: r.company || S.me.tenant, code: a.dataset.code, password: pw.trim() };
+      if (a.dataset.id === S.me.id && (await db.meta('connection'))?.session) toast('Your own password changed: sign in again on this phone with it.');
+      render();
+    } else if (act === 'useradd') {
+      const pw = $('#nu-pw').value.trim();
+      if (pw.length < 6) { $('#formerr').textContent = 'Password must be at least 6 characters.'; return; }
       const r = await S.api.addUser({ name: $('#nu-name').value, code: $('#nu-code').value, role: $('#nu-role').value });
-      S.newKey = { name: r.name, key: r.key }; render();
+      const p = await S.api.setPassword(r.id, pw).catch((err) => { toast(err.message); return null; });
+      if (p) S.newLogin = { name: r.name, company: p.company || S.me.tenant, code: r.code, password: pw };
+      else S.newKey = { name: r.name, key: r.key };
+      render();
     } else if (act === 'userkey') {
       if (!confirm(`Create a new sign-in key for ${a.dataset.name}? Their current key stops working at once.`)) return;
       const r = await S.api.resetUserKey(a.dataset.id);
@@ -570,6 +684,7 @@ document.addEventListener('change', async (e) => {
 
 document.addEventListener('input', (e) => {
   const el = e.target;
+  if (el.id === 'archq') { S.archQ = el.value; clearTimeout(S._aq); S._aq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#archq'); n.focus(); n.setSelectionRange(pos, pos); }, 300); return; }
   if (el.id === 'listq') { S.listQ = el.value; clearTimeout(S._lq); S._lq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#listq'); n.focus(); n.setSelectionRange(pos, pos); }, 150); return; }
   if (el.id === 'partyq') { S.partyQ = el.value; clearTimeout(S._pq); S._pq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#partyq'); n.focus(); n.setSelectionRange(pos, pos); }, 120); return; }
   if (!S.draft) return;
@@ -578,19 +693,50 @@ document.addEventListener('input', (e) => {
 });
 
 async function switchMode(mode) {
-  const unsynced = (await db.all('txns')).filter((t) => t.status !== 'synced');
-  if (unsynced.length && !confirm(`${unsynced.length} transaction(s) on this device are not synced and will be lost. Continue?`)) return;
+  if (!(await confirmUnsynced())) return;
   if (mode === 'live') {
     const url = $('#c-url').value.trim() || location.origin, token = $('#c-token').value.trim();
     if (!token) return toast('Enter your sign-in key.');
     const api = new HttpApi(url, token);
     const me = await api.me();
-    await db.meta('connection', { url, token });
-    await db.meta('me', me);
-  } else await db.meta('me', null);
+    await resetDevice('live', { connection: { url, token }, me });
+  } else await resetDevice('demo', {});
+}
+
+async function confirmUnsynced() {
+  const unsynced = (await db.all('txns')).filter((t) => t.status !== 'synced');
+  return !unsynced.length || confirm(`${unsynced.length} transaction(s) on this device are not synced and will be lost. Continue?`);
+}
+
+/** Start this device afresh in a mode: masters, transactions and settings come again from the server. */
+async function resetDevice(mode, { connection, me = null }) {
+  if (connection !== undefined) await db.meta('connection', connection);
+  await db.meta('me', me);
   for (const s of ['ledgers', 'items', 'txns']) await db.clear(s);
   await db.meta('mastersCursor', 0); await db.meta('settings', null); await db.meta('mode', mode);
-  location.hash = ''; location.reload();
+  location.hash = mode === 'live' ? '' : 'signin'; location.reload();
+}
+
+async function signIn(btn) {
+  const company = $('#li-co').value.trim().toLowerCase(), code = $('#li-code').value.trim().toUpperCase(), password = $('#li-pw').value;
+  const err = (m) => { $('#lierr').textContent = m; };
+  if (!company || !code || !password) return err('Enter your company ID, user code and password.');
+  const url = $('#c-url')?.value.trim() || location.origin;
+  btn.disabled = true; btn.textContent = 'Signing in…';
+  try {
+    const r = await HttpApi.login(url, company, code, password);
+    await db.meta('lastLogin', { company, code });
+    // Signing in again as the same person keeps unsynced work; anyone else starts afresh.
+    const prev = (await db.meta('me')) || {};
+    if (S.mode === 'live' && prev.id === r.user.id) {
+      await db.meta('connection', { url, token: r.key, session: true }); await db.meta('me', r.user);
+      location.hash = ''; return location.reload();
+    }
+    if (!(await confirmUnsynced())) return;
+    await resetDevice('live', { connection: { url, token: r.key, session: true }, me: r.user });
+  } catch (e) {
+    err(e instanceof NetworkError ? 'No connection to the server. Check the internet and try again.' : e.message);
+  } finally { btn.disabled = false; btn.textContent = 'Sign in'; }
 }
 
 async function saveSettings(s, msg = 'Saved for all users') {
@@ -623,6 +769,9 @@ async function saveCompany() {
   if (!name) { $('#formerr').textContent = 'Enter the company name.'; return; }
   const days = Number($('#co-ret').value);
   if (!(days >= 1 && days <= 30)) { $('#formerr').textContent = 'Keep transactions for 1 to 30 days.'; return; }
+  const active = Number($('#co-active').value), arch = Number($('#co-arch').value);
+  if (!(Number.isInteger(active) && active >= 1 && active <= 365)) { $('#formerr').textContent = 'Keep entries active on the server for 1 to 365 days.'; return; }
+  if (!(Number.isInteger(arch) && arch >= 0 && arch <= 365)) { $('#formerr').textContent = 'Keep the archive for 0 to 365 days.'; return; }
   const modes = $('#co-modes').value.split('\n').map((x) => x.trim()).filter(Boolean);
   if (!modes.length) { $('#formerr').textContent = 'Add at least one receipt mode.'; return; }
   let logo = s.company.logo || '';
@@ -630,7 +779,7 @@ async function saveCompany() {
   if (f) logo = await readLogo(f); else if (S.pendingLogo === '') logo = '';
   S.pendingLogo = undefined;
   Object.assign(s.company, { name, address: $('#co-addr').value.trim(), trn: $('#co-trn').value.trim(), phone: $('#co-phone').value.trim(), email: $('#co-email').value.trim(), footer: $('#co-foot').value.trim(), logo });
-  Object.assign(s, { retentionDays: days, allowRateEdit: $('#co-rate').checked, receiptModes: modes });
+  Object.assign(s, { retentionDays: days, serverActiveDays: active, archiveDays: arch, allowRateEdit: $('#co-rate').checked, receiptModes: modes });
   await saveSettings(s);
 }
 

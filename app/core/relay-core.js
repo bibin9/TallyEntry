@@ -14,8 +14,13 @@ function blankTenant(id, name) {
     log: [],                      // sync log, newest last (capped)
     connector: { state: { ledgerAlterId: 0, itemAlterId: 0, codeSeq: {}, lastKeysCheck: null }, lastSeen: null, version: null },
     settings: null,
+    purged: {},                   // ids of deleted transactions -> time, so a late re-send is refused
+    lastCleanup: null,
   };
 }
+
+/** A retention setting in days: whole number, lo..3650, or the default if it is not a number. */
+const days = (v, d, lo) => Math.min(Math.max(v !== null && v !== '' && Number.isFinite(+v) ? Math.trunc(+v) : d, lo), 3650);
 
 const MASTER_FIELDS = {
   ledgers: ['name', 'parent', 'role', 'phone', 'email', 'trn', 'address', 'tallyGuid', 'active'],
@@ -56,6 +61,7 @@ export class RelayCore {
     const results = [];
     for (const x of txns) {
       if (!x.id || !x.type || !(x.version >= 1)) { results.push({ id: x.id, accepted: false, error: 'invalid' }); continue; }
+      if (t.purged?.[x.id]) { results.push({ id: x.id, accepted: false, purged: true, error: 'This entry is older than the company keeps data for, so it was not sent again' }); continue; }
       const cur = t.txns[x.id];
       if (cur && cur.version >= x.version) { results.push({ id: x.id, accepted: false, duplicate: true, version: cur.version }); continue; }
       const { status, error, tally, pushedVersion, syncedVersion, ...data } = x; // device-only fields are ignored
@@ -94,12 +100,65 @@ export class RelayCore {
     return { ok: true };
   }
 
+  /** Retention: synced transactions stay active for serverActiveDays (default 7), are then archived
+   *  for archiveDays (default 30), then deleted. Anything not yet in Tally is never touched. */
+  async cleanup(tid, at = Date.now()) {
+    const t = this.tenant(tid);
+    const active = days(t.settings?.serverActiveDays, 7, 1), archive = days(t.settings?.archiveDays, 30, 0);
+    const DAY = 86400000; let archived = 0, deleted = 0;
+    t.purged ||= {};
+    for (const x of Object.values(t.txns)) {
+      const m = t.mappings[x.id];
+      if (x.status !== 'synced') continue;
+      if (!x.archivedAt && m && m.syncedVersion >= x.version && Date.parse(m.syncedAt) < at - active * DAY) { x.archivedAt = new Date(at).toISOString(); archived++; }
+      else if (x.archivedAt && Date.parse(x.archivedAt) < at - archive * DAY) {
+        delete t.txns[x.id]; delete t.mappings[x.id]; t.purged[x.id] = new Date(at).toISOString(); deleted++;
+      }
+    }
+    const before = t.log.length;
+    t.log = t.log.filter((l) => Date.parse(l.at) >= at - (active + archive) * DAY);
+    for (const [id, when] of Object.entries(t.purged)) if (Date.parse(when) < at - 365 * DAY) delete t.purged[id];
+    t.lastCleanup = new Date(at).toISOString();
+    await this._save();
+    return { archived, deleted, logDeleted: before - t.log.length };
+  }
+
+  /** Office check that everything reached Tally (same shape as txns.summary in SQL). */
+  async getSummary(tid, users = {}) {
+    const t = this.tenant(tid);
+    const all = Object.values(t.txns), hourAgo = Date.now() - 3600000;
+    const counts = { queued: 0, failed: 0, conflict: 0, synced: 0, archived: 0 };
+    for (const x of all) { if (x.archivedAt) counts.archived++; else counts[x.status] = (counts[x.status] || 0) + 1; }
+    const waiting = all.filter((x) => x.status !== 'synced').map((x) => x.receivedAt).sort();
+    const attention = all.filter((x) => ['failed', 'conflict'].includes(x.status) || (x.status === 'queued' && Date.parse(x.receivedAt) < hourAgo))
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt)).slice(0, 100)
+      .map((x) => ({ id: x.id, type: x.type, number: x.number, date: x.date, partyCode: x.partyCode, party: t.ledgers[x.partyCode]?.name, status: x.status,
+        error: x.error || undefined, conflict: x.conflict || undefined, createdBy: users[x.createdBy] || x.createdBy, receivedAt: x.receivedAt, attempts: x.attempts || 0 }));
+    return { counts, oldestWaiting: waiting[0] || null, connector: { lastSeen: t.connector.lastSeen, tallyOk: t.connector.tallyOk ?? null, version: t.connector.version }, attention };
+  }
+
+  /** Archived transactions for the office admin, newest first; q searches number, party code or name. */
+  async getArchive(tid, q = '') {
+    const t = this.tenant(tid);
+    const archiveDays = days(t.settings?.archiveDays, 30, 0);
+    const needle = String(q || '').toLowerCase();
+    return Object.values(t.txns).filter((x) => x.archivedAt).map((x) => {
+      const m = t.mappings[x.id], party = t.ledgers[x.partyCode]?.name;
+      const total = x.type === 'rc' ? Number(x.amount) || 0  // before tax, like qe_txn_total() in SQL
+        : (x.lines || []).reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0) * (1 - (Number(l.discPct) || 0) / 100), 0);
+      return { id: x.id, type: x.type, number: x.number, date: x.date, partyCode: x.partyCode, party, total: Math.round(total * 100) / 100, createdBy: x.createdBy,
+        archivedAt: x.archivedAt, voucherNo: m?.voucherNo, syncedAt: m?.syncedAt, deleteOn: new Date(Date.parse(x.archivedAt) + archiveDays * 86400000).toISOString().slice(0, 10) };
+    }).filter((r) => !needle || [r.number, r.partyCode, r.party].some((v) => String(v || '').toLowerCase().includes(needle)))
+      .sort((a, b) => (b.archivedAt.localeCompare(a.archivedAt)) || String(b.number).localeCompare(String(a.number))).slice(0, 200);
+  }
+
   async getLog(tid, limit = 100) { return this.tenant(tid).log.slice(-limit).reverse(); }
 
   // ------------------------------------------------------------ connector API
   async connectorHello(tid, info = {}) {
     const t = this.tenant(tid);
     t.connector.lastSeen = now(); t.connector.version = info.version || null; t.connector.tallyOk = info.tallyOk ?? null;
+    if (!t.lastCleanup || Date.parse(t.lastCleanup) < Date.now() - 3600000) await this.cleanup(tid);
     await this._save();
     return { state: t.connector.state, settings: t.settings };
   }

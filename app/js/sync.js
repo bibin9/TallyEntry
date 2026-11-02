@@ -81,6 +81,10 @@ export class SyncEngine {
         for (const r of res) {
           const cur = await db.get('txns', r.id);
           const sentVersion = chunk.find((t) => t.id === r.id).version;
+          if (cur && r.purged) { // already in Tally and since cleaned off the server: nothing left to send
+            Object.assign(cur, { pushedVersion: cur.version, syncedVersion: cur.version, status: 'synced', error: null });
+            await db.put('txns', cur); continue;
+          }
           if (!cur || (!r.accepted && !r.duplicate)) continue;
           // Only mark as sent if it was not edited again while uploading.
           cur.pushedVersion = Math.max(cur.pushedVersion || 0, sentVersion);
