@@ -9,6 +9,10 @@
 // On Windows, connector/windows/install.cmd sets it up to start with the PC (see docs/SETUP.md).
 
 import fs from 'node:fs';
+import dns from 'node:dns';
+import net from 'node:net';
+import tls from 'node:tls';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Connector, CONNECTOR_VERSION } from '../app/core/connector-core.js';
@@ -95,11 +99,72 @@ const connector = new Connector({
   conflictPolicy: cfg.conflictPolicy || 'tally-wins', writeCodes: cfg.writeCodesToTally !== false,
 });
 
+// Cloud unreachable: write the step-by-step network test to the log, at most every 10 minutes.
+let lastDiag = 0;
+async function diagIfNetwork(msg) {
+  if (!/fetch failed/i.test(msg || '') || Date.now() - lastDiag < 600000) return;
+  lastDiag = Date.now();
+  try { for (const l of await netDiagnose()) log('info', 'net: ' + l.trim()); } catch { }
+}
+
 async function cycle() {
   const r = await connector.runOnce();
-  if (r.error) log('warn', r.error);
+  if (r.error) { log('warn', r.error); await diagIfNetwork(r.error); }
   else log('info', `cycle ok: ${r.posted.length} transaction(s) processed`);
   return r;
+}
+
+// Step-by-step network test, so a failure says exactly where it stops: DNS, TCP, TLS or HTTP.
+async function netDiagnose() {
+  const lines = [], info = (m) => lines.push('  INFO  ' + m), bad = (m) => lines.push('  FAIL  ' + m);
+  const u = new URL(cfg.relayUrl);
+  const host = u.hostname, port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
+  const sysCa = process.execArgv.includes('--use-system-ca') || /--use-system-ca/.test(process.env.NODE_OPTIONS || '');
+  info(`Node.js ${process.version} on ${process.platform} ${process.arch}; Windows certificate store ${sysCa ? 'ON (--use-system-ca)' : 'OFF'}`);
+  const proxies = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED']
+    .filter((k) => process.env[k]).map((k) => `${k}=${String(process.env[k]).slice(0, 120)}`);
+  info('Proxy/TLS environment: ' + (proxies.length ? proxies.join(' ') : 'none set'));
+  if (process.platform === 'win32') {
+    try {
+      const w = execFileSync('netsh', ['winhttp', 'show', 'proxy'], { timeout: 5000, encoding: 'utf8' });
+      info('Windows proxy (netsh winhttp): ' + w.replace(/\s+/g, ' ').replace(/^.*?Current WinHTTP proxy settings:\s*/i, '').trim());
+    } catch (e) { info('Windows proxy: could not read (' + (e.code || e.message) + ')'); }
+  }
+  let addrs = [];
+  try {
+    addrs = await dns.promises.lookup(host, { all: true });
+    info(`DNS ${host} -> ${addrs.map((a) => a.address).join(', ')}`);
+  } catch (e) { bad(`DNS lookup of ${host} failed: ${e.code || e.message} (DNS blocked or no internet)`); return lines; }
+  const tcp = await new Promise((res) => {
+    const t0 = Date.now(), sock = net.connect({ host, port, timeout: 8000 });
+    sock.once('connect', () => { sock.destroy(); res({ ok: true, ms: Date.now() - t0 }); });
+    sock.once('timeout', () => { sock.destroy(); res({ ok: false, err: 'ETIMEDOUT' }); });
+    sock.once('error', (e) => res({ ok: false, err: e.code || e.message }));
+  });
+  if (!tcp.ok) { bad(`TCP connect to ${host}:${port} failed: ${tcp.err} (firewall, antivirus or network blocks node.exe)`); return lines; }
+  info(`TCP connect to ${host}:${port} OK in ${tcp.ms} ms`);
+  if (u.protocol === 'https:') {
+    const t = await new Promise((res) => {
+      const sock = tls.connect({ host, port, servername: host, rejectUnauthorized: false, timeout: 8000 });
+      sock.once('secureConnect', () => {
+        const c = sock.getPeerCertificate() || {};
+        res({ ok: sock.authorized, why: sock.authorizationError, subject: c.subject && c.subject.CN, issuer: c.issuer && (c.issuer.O || c.issuer.CN), to: c.valid_to, proto: sock.getProtocol() });
+        sock.destroy();
+      });
+      sock.once('timeout', () => { sock.destroy(); res({ err: 'ETIMEDOUT' }); });
+      sock.once('error', (e) => res({ err: e.code || e.message }));
+    });
+    if (t.err) { bad(`TLS handshake with ${host} failed: ${t.err} (something on the network interrupts HTTPS)`); return lines; }
+    const certTxt = `certificate for ${t.subject || '?'} issued by "${t.issuer || '?'}", valid to ${t.to || '?'}, ${t.proto || ''}`;
+    if (t.ok) info(`TLS OK: ${certTxt}`);
+    else bad(`TLS certificate not trusted (${t.why}): ${certTxt}. If the issuer is your antivirus or a company proxy, install.cmd uses --use-system-ca so Node.js trusts it; otherwise turn off HTTPS scanning for node.exe.`);
+    info(`PC clock: ${new Date().toISOString()} (a wrong date breaks certificates)`);
+  }
+  try {
+    const r = await fetch(cfg.relayUrl.replace(/\/$/, '') + '/api/me', { signal: AbortSignal.timeout(10000) });
+    info(`HTTP GET /api/me -> ${r.status} (401 here is normal: it means the cloud answers)`);
+  } catch (e) { bad(`HTTP request failed: ${netReason(e)}`); }
+  return lines;
 }
 
 async function check() {
@@ -134,6 +199,10 @@ async function check() {
     if (/401|403/.test(e.message)) bad(`Cloud at ${cfg.relayUrl} refused the connector key (${e.message})`);
     else bad(`Cannot reach the cloud at ${cfg.relayUrl}: ${e.message}. Check the internet and the relayUrl setting.`);
   }
+  if (out.some((l) => l.includes('cloud')) && (out.some((l) => l.startsWith('  FAIL') && l.includes('cloud')) || process.argv.includes('--debug'))) {
+    out.push('', 'Network details (send this to support):');
+    try { out.push(...await netDiagnose()); } catch (e) { out.push('  FAIL  network test crashed: ' + e.message); }
+  }
   console.log(`QuickEntry connector check (version ${CONNECTOR_VERSION})\n` + out.join('\n'));
   return out.every((l) => l.startsWith('  OK'));
 }
@@ -147,8 +216,11 @@ if (process.argv.includes('--check')) {
   // A service must keep running: log unexpected errors instead of exiting.
   process.on('uncaughtException', (e) => log('error', 'uncaught: ' + (e && e.stack || e)));
   process.on('unhandledRejection', (e) => log('error', 'unhandled: ' + (e && e.stack || e)));
-  log('info', `QuickEntry connector started. Tally ${cfg.tallyUrl}, company "${cfg.tallyCompany}", relay ${cfg.relayUrl}`);
+  log('info', `QuickEntry connector started. Tally ${cfg.tallyUrl}, company "${cfg.tallyCompany}", relay ${cfg.relayUrl} (Node.js ${process.version}${process.execArgv.includes('--use-system-ca') ? ', Windows certificates ON' : ''})`);
   const every = (cfg.intervalSec || 30) * 1000;
-  const loop = async () => { try { await cycle(); } catch (e) { log('error', e.message); } setTimeout(loop, every); };
+  const loop = async () => {
+    try { await cycle(); } catch (e) { log('error', e.message); await diagIfNetwork(e.message); }
+    setTimeout(loop, every);
+  };
   loop();
 }
