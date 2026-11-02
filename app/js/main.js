@@ -34,7 +34,16 @@ const S = {
 
 // ------------------------------------------------------------------ boot
 async function boot() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // When a new version of the app is installed, switch to it at once (unless someone is mid-entry).
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloadingForUpdate) return;
+      if (['new', 'edit'].includes(S.view)) { toast('A new version of the app is ready. It loads when you finish this entry.'); pendingUpdate = true; return; }
+      reloadingForUpdate = true; location.reload();
+    });
+    navigator.serviceWorker.register('./sw.js').then((r) => r.update()).catch(() => {});
+  }
   requestPersistence();
   S.mode = (await db.meta('mode')) || 'demo';
   if (S.mode === 'live') {
@@ -88,8 +97,10 @@ async function loadTxns() {
 
 function ctx() { return { settings: S.settings, ledgerByCode: S.ledgerByCode, itemByCode: S.itemByCode }; }
 
+let reloadingForUpdate = false, pendingUpdate = false;
 function route() {
   const [view, ...rest] = (location.hash.slice(1) || 'home').split('/');
+  if (pendingUpdate && !['new', 'edit'].includes(view)) { reloadingForUpdate = true; return location.reload(); }
   S.view = view; S.params = rest;
   render();
 }
