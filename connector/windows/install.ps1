@@ -72,6 +72,12 @@ $ver = (& $node -v).Trim()
 $major = [int]($ver.TrimStart('v').Split('.')[0])
 if ($major -lt 18) { Fail "Node.js $ver is too old. Install Node.js LTS (20 or later) from https://nodejs.org." }
 Ok "Node.js $ver at $node"
+# Trust the Windows certificate store too, so antivirus or company proxies that inspect HTTPS
+# do not make every call fail with "fetch failed" (Node 22.15+ / 23.8+ understand this flag).
+$nodeFlags = @()
+try { $null = & $node --use-system-ca -e 0 2>&1 } catch { }
+if ($LASTEXITCODE -eq 0) { $nodeFlags = @('--use-system-ca'); Ok 'Node.js will also trust the Windows certificate store' }
+$flagText = if ($nodeFlags.Count) { '--use-system-ca ' } else { '' }
 
 # 4. Stop a running copy before replacing files
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -141,14 +147,14 @@ if ($NewKey -or -not (Test-Path $keyPath)) {
 
 # 8. Connection test
 Say ''
-& $node (Join-Path $InstallDir 'connector\index.js') --config $cfgPath --check
+& $node @nodeFlags (Join-Path $InstallDir 'connector\index.js') --config $cfgPath --check
 $checkOk = ($LASTEXITCODE -eq 0)
 Say ''
 if (-not $checkOk) { Warn 'The test above found a problem. The connector is installed anyway and keeps retrying; fix the item marked FAIL, then run check.cmd.' }
 
 # 9. Scheduled task: SYSTEM, at startup, no time limit, re-checked every 5 minutes
 $action = New-ScheduledTaskAction -Execute $node `
-  -Argument ('"{0}" --config "{1}"' -f (Join-Path $InstallDir 'connector\index.js'), $cfgPath) `
+  -Argument ('{2}"{0}" --config "{1}"' -f (Join-Path $InstallDir 'connector\index.js'), $cfgPath, $flagText) `
   -WorkingDirectory $InstallDir
 $atStartup = New-ScheduledTaskTrigger -AtStartup
 $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
