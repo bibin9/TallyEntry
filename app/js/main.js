@@ -120,6 +120,7 @@ async function renderChrome() {
   const signedOut = S.mode === 'live' && /sign in again/i.test(S.sync.lastError || '');
   if (signedOut) $('#modebar').innerHTML = `<b>Signed out</b> Your password or key was changed. <a href="#signin">Sign in again</a>`;
   $('#modebar').hidden = (S.mode !== 'demo' && !signedOut) || S.view === 'signin';
+  $('#topsignout').hidden = S.mode !== 'live' || S.view === 'signin';
   if (['home', 'list', 'detail', 'sync'].includes(S.view) && !document.activeElement?.matches('input,select,textarea')) render(true);
 }
 

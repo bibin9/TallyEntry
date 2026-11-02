@@ -27,6 +27,7 @@ const errors = [];
   await page.click('[data-act="trydemo"]');
   await page.waitForSelector('.tiles');
   check(true, '"Try the demo" opens the app with sample data');
+  check(!(await page.isVisible('#topsignout')), 'Demo mode has no Sign out button in the top bar');
 
   await page.goto(BASE + '/#more');
   await page.waitForSelector('text=Users and passwords');
@@ -148,6 +149,8 @@ if (process.env.QE_PG_URL) {
   await ph.fill('#li-pw', 'office123'); await ph.click('[data-act="signin"]');
   await ph.waitForSelector('.tiles');
   check(!(await ph.isVisible('#modebar')), 'Signed in to live mode (no demo banner)');
+  check(await ph.isVisible('#topsignout'), 'Live mode shows Sign out in the top bar');
+  await ph.screenshot({ path: `${OUT}/topbar-live.png`, clip: { x: 0, y: 0, width: 390, height: 120 } });
   await ph.goto(url + '/#more'); await ph.waitForSelector('text=Sign out');
   check((await ph.textContent('#view')).includes(id), 'More shows the company ID of the signed-in person');
   await ph.goto(url + '/#synccheck'); await ph.waitForSelector('#verdict');
@@ -155,11 +158,12 @@ if (process.env.QE_PG_URL) {
   await ph.screenshot({ path: `${OUT}/synccheck-pc-off.png`, fullPage: true });
   await ph.goto(url + '/#users'); await ph.waitForSelector('text=Company ID:');
   await ph.screenshot({ path: `${OUT}/users-live.png`, fullPage: true });
-  await ph.goto(url + '/#more'); await ph.waitForSelector('text=Sign out');
+  await ph.goto(url + '/#home'); await ph.waitForSelector('.tiles');
   ph.once('dialog', (d) => d.accept());
-  await ph.click('[data-act="signout"]');
+  await ph.click('#topsignout');
   await ph.waitForSelector('#li-co');
-  check((await ph.inputValue('#li-co')) === id, 'Sign out returns to the sign-in screen with the Company ID remembered');
+  check((await ph.inputValue('#li-co')) === id, 'Sign out from the top bar returns to the sign-in screen with the Company ID remembered');
+  check(!(await ph.isVisible('#topsignout')), 'The sign-in screen has no Sign out button');
   await phone.close();
   const { default: pg } = await import('pg');
   const pool = new pg.Pool({ connectionString: process.env.QE_PG_URL });

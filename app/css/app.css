@@ -7,6 +7,8 @@ button{font:inherit;color:inherit}
 #modebar a{color:#6b4a00}
 .top{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;position:sticky;top:0;z-index:5}
 .brand{font-weight:700;letter-spacing:.02em}
+.topr{display:flex;gap:6px;align-items:center}
+.pill.out{background:transparent;box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.75)}
 .pill{border:0;border-radius:20px;padding:6px 12px;font-size:13px;font-weight:600;background:rgba(255,255,255,.2);color:#fff;cursor:pointer}
 .pill.ok{background:#e3f6ec;color:var(--green)}.pill.wait{background:#fff1d6;color:var(--amber)}.pill.bad{background:#fde3e3;color:var(--red)}.pill.off{background:#e9edf3;color:#46506a}.pill.busy{background:rgba(255,255,255,.3)}
 .bar{display:flex;align-items:center;gap:8px;padding:12px 14px 4px}
