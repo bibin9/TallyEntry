@@ -57,11 +57,26 @@ async function tally(xml) {
   } finally { clearTimeout(t); }
 }
 
+// Node only says "fetch failed"; the real reason (DNS, firewall, proxy, certificate) is in e.cause.
+function netReason(e) {
+  const c = e && e.cause;
+  if (!c) return e.message;
+  const code = c.code || (c.errors && c.errors[0] && c.errors[0].code) || '';
+  const hint = /ENOTFOUND|EAI_AGAIN/.test(code) ? 'the name could not be found (DNS or no internet)'
+    : /ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT/.test(code) ? 'the connection was blocked or timed out (firewall, antivirus or proxy)'
+    : /CERT|SSL|TLS/i.test(code + c.message) ? 'the secure connection was rejected (antivirus or proxy inspecting HTTPS, or the PC clock is wrong)'
+    : '';
+  return `${e.message}: ${code || c.message}${hint ? ' - ' + hint : ''}`;
+}
+
 async function call(method, p, body) {
-  const r = await fetch(cfg.relayUrl.replace(/\/$/, '') + p, {
-    method, headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let r;
+  try {
+    r = await fetch(cfg.relayUrl.replace(/\/$/, '') + p, {
+      method, headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) { throw new Error(netReason(e)); }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(`Relay ${p}: ${r.status} ${data.error || ''}`);
   return data;
