@@ -43,7 +43,7 @@ if (!key) { console.error('No connector key (set QE_CONNECTOR_KEY, keyFile or co
 const rawKeyLen = key.length;
 key = key.replace(/[^A-Za-z0-9_-]/g, '');
 const keyStripped = rawKeyLen - key.length;
-if (!key) { console.error('The connector key has no valid characters. Run install.cmd -NewKey and paste it again.'); process.exit(1); }
+if (!key) { console.error('The saved connector key is not a key (often Ctrl+V was pressed at the hidden prompt, which types one invisible character). Run install.cmd -NewKey and RIGHT-CLICK to paste the key.'); process.exit(1); }
 
 const logFile = cfg.logFile ? near(cfg.logFile) : null;
 const LOG_MAX = (cfg.logMaxMb || 5) * 1024 * 1024;
@@ -241,7 +241,8 @@ async function check() {
       } else ok(`Company "${cfg.tallyCompany}" is open in TallyPrime`);
     } catch (e) { tallyOk = false; bad(`TallyPrime did not answer a data request: ${netReason(e)}`); }
   }
-  say(`  INFO  Connector key: ${keyNote()}`);
+  if (key.length < 20) bad(`The saved connector key is too short to be a key (${keyNote()}). Run install.cmd -NewKey and RIGHT-CLICK to paste the key (Ctrl+V does not paste in that prompt).`);
+  else say(`  INFO  Connector key: ${keyNote()}`);
   step(`Testing the cloud at ${cfg.relayUrl}`);
   let cloudOk = false;
   try {
