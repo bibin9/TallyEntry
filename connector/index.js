@@ -37,6 +37,13 @@ let key = process.env.QE_CONNECTOR_KEY || '';
 if (!key && cfg.keyFile && fs.existsSync(near(cfg.keyFile))) key = fs.readFileSync(near(cfg.keyFile), 'utf8').trim();
 if (!key) key = cfg.connectorKey || '';
 if (!key) { console.error('No connector key (set QE_CONNECTOR_KEY, keyFile or connectorKey in config).'); process.exit(1); }
+// Keys only ever use A-Z a-z 0-9 - _. A paste can bring in hidden characters (Ctrl+V in some
+// consoles types a control character, chat apps add zero-width spaces), and Node then refuses
+// to send the header at all (ERR_INVALID_CHAR). Drop anything that cannot be part of a key.
+const rawKeyLen = key.length;
+key = key.replace(/[^A-Za-z0-9_-]/g, '');
+const keyStripped = rawKeyLen - key.length;
+if (!key) { console.error('The connector key has no valid characters. Run install.cmd -NewKey and paste it again.'); process.exit(1); }
 
 const logFile = cfg.logFile ? near(cfg.logFile) : null;
 const LOG_MAX = (cfg.logMaxMb || 5) * 1024 * 1024;
@@ -50,6 +57,8 @@ const log = (level, msg) => {
     fs.appendFileSync(logFile, line + '\n');
   } catch { /* logging must never stop the connector */ }
 };
+const keyNote = () => `${key.length} characters, ending ...${key.slice(-4)}` + (keyStripped ? `; ${keyStripped} hidden or invalid character(s) from the paste were removed` : '');
+if (keyStripped && !process.argv.includes('--check')) log('warn', `Connector key: ${keyNote()}`);
 
 // HTTP with node:http/https and a hard time limit. (fetch() is not used: on one client PC with
 // Node.js 26 and the Windows certificate store, a fetch never settled and the process just ended.)
@@ -93,6 +102,7 @@ function netReason(e) {
   const hint = /ENOTFOUND|EAI_AGAIN/.test(code) ? 'the name could not be found (DNS or no internet)'
     : /ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|EPIPE/.test(code) ? 'the connection was blocked or timed out (firewall, antivirus or proxy)'
     : /CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO/i.test(code + ' ' + (c.message || '')) ? 'the secure connection was rejected (antivirus or proxy inspecting HTTPS, or the PC clock is wrong)'
+    : /ERR_INVALID_CHAR/.test(code) ? 'the connector key contains a character that cannot be sent; run install.cmd -NewKey and paste the key again'
     : '';
   const what = c === e ? e.message : `${e.message}: ${c.message}`;
   return `${code ? code + ' ' : ''}${what}${hint ? ' - ' + hint : ''}`;
@@ -231,6 +241,7 @@ async function check() {
       } else ok(`Company "${cfg.tallyCompany}" is open in TallyPrime`);
     } catch (e) { tallyOk = false; bad(`TallyPrime did not answer a data request: ${netReason(e)}`); }
   }
+  say(`  INFO  Connector key: ${keyNote()}`);
   step(`Testing the cloud at ${cfg.relayUrl}`);
   let cloudOk = false;
   try {
@@ -238,7 +249,7 @@ async function check() {
     cloudOk = true;
     ok(`Cloud answers at ${cfg.relayUrl} and accepts the connector key`);
   } catch (e) {
-    if (/ 401| 403/.test(e.message)) bad(`Cloud at ${cfg.relayUrl} refused the connector key (${e.message}). Paste the key again with install.cmd -NewKey.`);
+    if (/ 401| 403/.test(e.message)) bad(`Cloud at ${cfg.relayUrl} refused the connector key (${e.message}). Paste the key again with install.cmd -NewKey (right-click to paste, or type it).`);
     else bad(`Cannot reach the cloud at ${cfg.relayUrl}: ${e.message}. Check the internet and the relayUrl setting.`);
   }
   if (!cloudOk || process.argv.includes('--debug')) {
