@@ -155,8 +155,10 @@ const udf = (name, value) =>
   `<UDF:${name}.LIST DESC="\`${name}\`" ISLIST="YES" TYPE="String"><UDF:${name} DESC="\`${name}\`">${esc(value)}</UDF:${name}></UDF:${name}.LIST>`;
 
 /** Write a generated stable code back onto a Tally master (needs the QuickEntry TDL). */
-export function setMasterCodeRequest(company, kind /* 'LEDGER' | 'STOCKITEM' */, name, code) {
-  return importEnv(company, 'All Masters', `<${kind} NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME>${udf('QECODE', code)}</${kind}>`);
+// TallyPrime refuses an Alter without the group ("Group Name not given!"), so PARENT is sent too.
+export function setMasterCodeRequest(company, kind /* 'LEDGER' | 'STOCKITEM' */, name, code, parent = '') {
+  const par = parent ? `<PARENT>${esc(parent)}</PARENT>` : '';
+  return importEnv(company, 'All Masters', `<${kind} NAME="${esc(name)}" ACTION="Alter"><NAME>${esc(name)}</NAME>${par}${udf('QECODE', code)}</${kind}>`);
 }
 
 const tdate = (iso) => String(iso).replace(/-/g, '');

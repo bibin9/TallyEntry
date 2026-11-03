@@ -232,6 +232,8 @@ export class TallySim {
     const coll = tag === 'LEDGER' ? this.s.ledgers : this.s.items;
     const m = coll[name];
     if (!m) throw new Error(`${tag === 'LEDGER' ? 'Ledger' : 'Stock Item'} '${name}' does not exist!`);
+    // Like TallyPrime, an Alter without the group is refused (seen on a real client PC).
+    if (!childText(n, 'PARENT')) throw new Error('Group Name not given!');
     const code = this._udf(n, 'QECODE');
     if (code) m.qeCode = code;
     m.alterId = this._alter();
