@@ -36,7 +36,7 @@ function Fail($msg) { Write-Host "  ERROR $msg" -ForegroundColor Red; exit 1 }
 function WriteText($path, $text) { [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false))) }
 
 Say ''
-Say 'QuickEntry connector setup'
+Say 'QuickEntry connector setup (version 0.2.1)'
 Say '--------------------------'
 
 # 1. Administrator rights
@@ -134,17 +134,25 @@ Ok "Settings saved to $cfgPath"
 # 7. Connector key (never on the command line, so it does not end up in history)
 $keyPath = Join-Path $DataDir 'connector.key'
 if ($NewKey -or -not (Test-Path $keyPath)) {
-  $sec = Read-Host 'Paste the connector key (it will not be shown)' -AsSecureString
-  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-  try { $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr).Trim() } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-  # Keys only use A-Z a-z 0-9 - _. A paste can add hidden characters (Ctrl+V in some consoles,
-  # zero-width spaces from chat apps), which make every cloud request fail. Remove them.
-  $clean = $plain -replace '[^A-Za-z0-9_-]', ''
-  $removed = $plain.Length - $clean.Length
-  $plain = $null
-  if (-not $clean) { Fail 'No key entered.' }
+  # Keys are 24+ characters of A-Z a-z 0-9 - _. In this hidden prompt Ctrl+V does NOT paste in
+  # many consoles: it types one invisible control character instead (the screen shows a single *).
+  # So anything else is removed, and a key that is too short is asked for again.
+  Say '  Tip: RIGHT-CLICK to paste here. Ctrl+V does not work in this prompt.'
+  $clean = ''
+  for ($try = 1; $try -le 3 -and $clean.Length -lt 20; $try++) {
+    $sec = Read-Host 'Paste the connector key (it will not be shown)' -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    try { $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    $clean = $plain -replace '[^A-Za-z0-9_-]', ''
+    $removed = $plain.Length - $clean.Length
+    $plain = $null
+    if ($clean.Length -lt 20) {
+      Warn "That is not a connector key (got $($clean.Length) usable characters). Right-click to paste the whole key, then press Enter."
+    }
+  }
+  if ($clean.Length -lt 20) { Fail 'No valid connector key entered. Copy the key again and run install.cmd -NewKey.' }
   WriteText $keyPath $clean
-  $note = "$($clean.Length) characters, ending ...$($clean.Substring([Math]::Max(0, $clean.Length - 4)))"
+  $note = "$($clean.Length) characters, ending ...$($clean.Substring($clean.Length - 4))"
   if ($removed -gt 0) { $note += "; removed $removed hidden character(s) from the paste" }
   $clean = $null
   Ok "Connector key saved ($note). Readable only by SYSTEM and Administrators"
