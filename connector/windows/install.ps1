@@ -137,10 +137,17 @@ if ($NewKey -or -not (Test-Path $keyPath)) {
   $sec = Read-Host 'Paste the connector key (it will not be shown)' -AsSecureString
   $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
   try { $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr).Trim() } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-  if (-not $plain) { Fail 'No key entered.' }
-  WriteText $keyPath $plain
+  # Keys only use A-Z a-z 0-9 - _. A paste can add hidden characters (Ctrl+V in some consoles,
+  # zero-width spaces from chat apps), which make every cloud request fail. Remove them.
+  $clean = $plain -replace '[^A-Za-z0-9_-]', ''
+  $removed = $plain.Length - $clean.Length
   $plain = $null
-  Ok 'Connector key saved (readable only by SYSTEM and Administrators)'
+  if (-not $clean) { Fail 'No key entered.' }
+  WriteText $keyPath $clean
+  $note = "$($clean.Length) characters, ending ...$($clean.Substring([Math]::Max(0, $clean.Length - 4)))"
+  if ($removed -gt 0) { $note += "; removed $removed hidden character(s) from the paste" }
+  $clean = $null
+  Ok "Connector key saved ($note). Readable only by SYSTEM and Administrators"
 } else {
   Ok 'Keeping the saved connector key (use -NewKey to replace it)'
 }
