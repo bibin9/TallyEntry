@@ -12,6 +12,8 @@ import fs from 'node:fs';
 import dns from 'node:dns';
 import net from 'node:net';
 import tls from 'node:tls';
+import http from 'node:http';
+import https from 'node:https';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,39 +51,64 @@ const log = (level, msg) => {
   } catch { /* logging must never stop the connector */ }
 };
 
-async function tally(xml) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), (cfg.tallyTimeoutSec || 60) * 1000);
-  try {
-    const r = await fetch(cfg.tallyUrl || 'http://localhost:9000', {
-      method: 'POST', body: xml, signal: ctl.signal,
-      headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+// HTTP with node:http/https and a hard time limit. (fetch() is not used: on one client PC with
+// Node.js 26 and the Windows certificate store, a fetch never settled and the process just ended.)
+// The timer is a normal (ref'd) timer, so a stalled request always ends with an error.
+function httpRequest(url, { method = 'GET', headers = {}, body, timeoutMs = 30000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (fn, v) => { if (!done) { done = true; clearTimeout(timer); fn(v); } };
+    let u;
+    try { u = new URL(url); } catch { reject(Object.assign(new Error(`Invalid address ${url}`), { code: 'EINVALIDURL' })); return; }
+    const lib = u.protocol === 'https:' ? https : http;
+    const data = body === undefined ? undefined : Buffer.from(body);
+    const req = lib.request(u, { method, headers: { ...headers, ...(data ? { 'Content-Length': data.length } : {}) }, agent: false }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => finish(resolve, { status: res.statusCode, ok: res.statusCode >= 200 && res.statusCode < 300, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', (e) => finish(reject, e));
     });
-    return await r.text();
-  } finally { clearTimeout(t); }
+    const timer = setTimeout(() => {
+      const e = Object.assign(new Error(`no answer within ${Math.round(timeoutMs / 1000)} s`), { code: 'ETIMEDOUT' });
+      req.destroy(e); finish(reject, e);
+    }, timeoutMs);
+    req.on('error', (e) => finish(reject, e));
+    if (data) req.write(data);
+    req.end();
+  });
 }
 
-// Node only says "fetch failed"; the real reason (DNS, firewall, proxy, certificate) is in e.cause.
+async function tally(xml) {
+  const r = await httpRequest(cfg.tallyUrl || 'http://localhost:9000', {
+    method: 'POST', body: xml, timeoutMs: (cfg.tallyTimeoutSec || 60) * 1000,
+    headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+  });
+  return r.text;
+}
+
+// Turn a network error into a plain reason: DNS, firewall, proxy, certificate or time-out.
 function netReason(e) {
-  const c = e && e.cause;
-  if (!c) return e.message;
+  const c = (e && e.cause) || e || {};
   const code = c.code || (c.errors && c.errors[0] && c.errors[0].code) || '';
   const hint = /ENOTFOUND|EAI_AGAIN/.test(code) ? 'the name could not be found (DNS or no internet)'
-    : /ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT/.test(code) ? 'the connection was blocked or timed out (firewall, antivirus or proxy)'
-    : /CERT|SSL|TLS/i.test(code + c.message) ? 'the secure connection was rejected (antivirus or proxy inspecting HTTPS, or the PC clock is wrong)'
+    : /ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|EPIPE/.test(code) ? 'the connection was blocked or timed out (firewall, antivirus or proxy)'
+    : /CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO/i.test(code + ' ' + (c.message || '')) ? 'the secure connection was rejected (antivirus or proxy inspecting HTTPS, or the PC clock is wrong)'
     : '';
-  return `${e.message}: ${code || c.message}${hint ? ' - ' + hint : ''}`;
+  const what = c === e ? e.message : `${e.message}: ${c.message}`;
+  return `${code ? code + ' ' : ''}${what}${hint ? ' - ' + hint : ''}`;
 }
 
 async function call(method, p, body) {
   let r;
   try {
-    r = await fetch(cfg.relayUrl.replace(/\/$/, '') + p, {
-      method, headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+    r = await httpRequest(cfg.relayUrl.replace(/\/$/, '') + p, {
+      method, timeoutMs: (cfg.relayTimeoutSec || 60) * 1000,
+      headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  } catch (e) { throw new Error(netReason(e)); }
-  const data = await r.json().catch(() => ({}));
+  } catch (e) { throw new Error('Cloud not reachable: ' + netReason(e)); }
+  let data = {};
+  try { data = JSON.parse(r.text); } catch { }
   if (!r.ok) throw new Error(`Relay ${p}: ${r.status} ${data.error || ''}`);
   return data;
 }
@@ -103,7 +130,7 @@ const connector = new Connector({
 // Cloud unreachable: write the step-by-step network test to the log, at most every 10 minutes.
 let lastDiag = 0;
 async function diagIfNetwork(msg) {
-  if (!/fetch failed/i.test(msg || '') || Date.now() - lastDiag < 600000) return;
+  if (!/Cloud not reachable|fetch failed/i.test(msg || '') || Date.now() - lastDiag < 600000) return;
   lastDiag = Date.now();
   try { for (const l of await netDiagnose()) log('info', 'net: ' + l.trim()); } catch { }
 }
@@ -133,7 +160,7 @@ async function netDiagnose() {
   }
   let addrs = [];
   try {
-    addrs = await dns.promises.lookup(host, { all: true });
+    addrs = await withLimit(dns.promises.lookup(host, { all: true }), 10000, 'DNS lookup');
     info(`DNS ${host} -> ${addrs.map((a) => a.address).join(', ')}`);
   } catch (e) { bad(`DNS lookup of ${host} failed: ${e.code || e.message} (DNS blocked or no internet)`); return lines; }
   const tcp = await new Promise((res) => {
@@ -162,56 +189,91 @@ async function netDiagnose() {
     info(`PC clock: ${new Date().toISOString()} (a wrong date breaks certificates)`);
   }
   try {
-    const r = await fetch(cfg.relayUrl.replace(/\/$/, '') + '/api/me', { signal: AbortSignal.timeout(10000) });
+    const r = await httpRequest(cfg.relayUrl.replace(/\/$/, '') + '/api/me', { timeoutMs: 15000 });
     info(`HTTP GET /api/me -> ${r.status} (401 here is normal: it means the cloud answers)`);
   } catch (e) { bad(`HTTP request failed: ${netReason(e)}`); }
   return lines;
 }
 
+// Run one step with a hard time limit, so a step that never settles is reported, not left hanging.
+function withLimit(promise, ms, what) {
+  let t;
+  return Promise.race([promise, new Promise((_, rej) => { t = setTimeout(() => rej(Object.assign(new Error(`${what}: no answer within ${Math.round(ms / 1000)} s`), { code: 'ETIMEDOUT' })), ms); })])
+    .finally(() => clearTimeout(t));
+}
+
 async function check() {
-  const out = [];
-  const ok = (m) => out.push('  OK    ' + m), bad = (m) => out.push('  FAIL  ' + m);
+  // Each line is printed as soon as it is known, so even a stop part-way shows how far it got.
+  const lines = [];
+  const say = (l) => { lines.push(l); console.log(l); };
+  const ok = (m) => say('  OK    ' + m), bad = (m) => say('  FAIL  ' + m), step = (m) => console.log('  ...   ' + m);
+  console.log(`QuickEntry connector check (version ${CONNECTOR_VERSION}, Node.js ${process.version}${process.execArgv.includes('--use-system-ca') ? ', Windows certificates ON' : ''})`);
   const tallyUrl = cfg.tallyUrl || 'http://localhost:9000';
   let tallyOk = false;
+  step(`Testing TallyPrime at ${tallyUrl}`);
   try {
-    const r = await fetch(tallyUrl, { signal: AbortSignal.timeout(5000) });
-    const t = await r.text();
-    tallyOk = /Running/i.test(t);
+    const r = await withLimit(httpRequest(tallyUrl, { timeoutMs: 8000 }), 10000, 'TallyPrime');
+    tallyOk = /Running/i.test(r.text);
     if (tallyOk) ok(`TallyPrime answers at ${tallyUrl}`);
-    else bad(`Something answers at ${tallyUrl} but it does not look like TallyPrime: ${t.slice(0, 80)}`);
+    else bad(`Something answers at ${tallyUrl} but it does not look like TallyPrime: ${r.text.slice(0, 80)}`);
   } catch (e) {
-    bad(`TallyPrime does not answer at ${tallyUrl}. Is Tally open, with the XML port enabled (F1 > Settings > Connectivity)?`);
+    bad(`TallyPrime does not answer at ${tallyUrl} (${netReason(e)}). Is Tally open, with the XML port enabled (F1 > Settings > Connectivity)?`);
   }
   if (tallyOk) {
+    step(`Testing company "${cfg.tallyCompany}"`);
     try {
       // Ask for ledgers changed after a very high AlterID: proves the company is open, returns almost nothing.
-      const t = await tally(ledgersRequest(cfg.tallyCompany, 999999999));
+      const t = await withLimit(tally(ledgersRequest(cfg.tallyCompany, 999999999)), 65000, 'TallyPrime data request');
       const err = /<LINEERROR>([^<]*)/i.exec(t);
       if (err) {
         tallyOk = false;
         bad(`Company "${cfg.tallyCompany}" is not open in TallyPrime (${err[1].replace(/&apos;/g, "'")}). Open it in Tally, or fix tallyCompany in the config: it must match exactly.`);
       } else ok(`Company "${cfg.tallyCompany}" is open in TallyPrime`);
-    } catch (e) { tallyOk = false; bad(`TallyPrime did not answer a data request: ${e.message}`); }
+    } catch (e) { tallyOk = false; bad(`TallyPrime did not answer a data request: ${netReason(e)}`); }
   }
+  step(`Testing the cloud at ${cfg.relayUrl}`);
+  let cloudOk = false;
   try {
-    await relay.hello({ version: CONNECTOR_VERSION, tallyOk });
+    await withLimit(relay.hello({ version: CONNECTOR_VERSION, tallyOk }), 70000, 'Cloud');
+    cloudOk = true;
     ok(`Cloud answers at ${cfg.relayUrl} and accepts the connector key`);
   } catch (e) {
-    if (/401|403/.test(e.message)) bad(`Cloud at ${cfg.relayUrl} refused the connector key (${e.message})`);
+    if (/ 401| 403/.test(e.message)) bad(`Cloud at ${cfg.relayUrl} refused the connector key (${e.message}). Paste the key again with install.cmd -NewKey.`);
     else bad(`Cannot reach the cloud at ${cfg.relayUrl}: ${e.message}. Check the internet and the relayUrl setting.`);
   }
-  if (out.some((l) => l.includes('cloud')) && (out.some((l) => l.startsWith('  FAIL') && l.includes('cloud')) || process.argv.includes('--debug'))) {
-    out.push('', 'Network details (send this to support):');
-    try { out.push(...await netDiagnose()); } catch (e) { out.push('  FAIL  network test crashed: ' + e.message); }
+  if (!cloudOk || process.argv.includes('--debug')) {
+    say('');
+    say('Network details (send this to support):');
+    try { for (const l of await withLimit(netDiagnose(), 60000, 'Network test')) say(l); }
+    catch (e) { bad('network test stopped: ' + e.message); }
   }
-  console.log(`QuickEntry connector check (version ${CONNECTOR_VERSION})\n` + out.join('\n'));
-  return out.every((l) => l.startsWith('  OK'));
+  if (process.argv.includes('--debug')) {
+    // Root-cause aid: the same two requests made with fetch(), which older versions used. If fetch
+    // fails or never settles where the lines above are OK, the problem is fetch on this PC.
+    say('');
+    say('fetch() comparison (diagnostic only):');
+    for (const [what, url] of [['TallyPrime', tallyUrl], ['Cloud', cfg.relayUrl.replace(/\/$/, '') + '/api/me']]) {
+      const t0 = Date.now();
+      const settled = fetch(url, { signal: AbortSignal.timeout(15000) }).then((r) => `answered HTTP ${r.status}`, (e) => `failed: ${netReason(e)}`);
+      const r = await Promise.race([settled, new Promise((res) => setTimeout(() => res(null), 25000))]);
+      say(`  INFO  fetch ${what}: ${r ? r : 'DID NOT SETTLE within 25 s; open handles: ' + process.getActiveResourcesInfo().join(', ')} (${Date.now() - t0} ms)`);
+    }
+  }
+  const allOk = lines.every((l) => !l.startsWith('  FAIL'));
+  console.log(allOk ? 'RESULT: everything OK' : 'RESULT: a problem was found (see the FAIL lines above)');
+  return allOk;
 }
 
 if (process.argv.includes('--check')) {
-  process.exit((await check()) ? 0 : 3);
+  // Last line of defence: whatever happens, the check ends with a clear result.
+  const watchdog = setTimeout(() => { console.log('  FAIL  The test did not finish within 4 minutes. Send this screen to support.\nRESULT: a problem was found'); process.exit(3); }, 240000);
+  let good = false;
+  try { good = await check(); } catch (e) { console.log('  FAIL  The test stopped: ' + (e && e.stack || e) + '\nRESULT: a problem was found'); }
+  clearTimeout(watchdog);
+  process.exit(good ? 0 : 3);
 } else if (process.argv.includes('--once')) {
-  const r = await cycle();
+  let r = { error: 'not run' };
+  try { r = await withLimit(cycle(), (cfg.cycleLimitMin || 15) * 60000, 'Sync cycle'); } catch (e) { log('error', e.message); }
   process.exit(r.error ? 2 : 0);
 } else {
   // A service must keep running: log unexpected errors instead of exiting.
@@ -220,8 +282,11 @@ if (process.argv.includes('--check')) {
   log('info', `QuickEntry connector started. Tally ${cfg.tallyUrl}, company "${cfg.tallyCompany}", relay ${cfg.relayUrl} (Node.js ${process.version}${process.execArgv.includes('--use-system-ca') ? ', Windows certificates ON' : ''})`);
   const every = (cfg.intervalSec || 30) * 1000;
   const loop = async () => {
-    try { await cycle(); } catch (e) { log('error', e.message); await diagIfNetwork(e.message); }
+    try { await withLimit(cycle(), (cfg.cycleLimitMin || 15) * 60000, 'Sync cycle'); }
+    catch (e) { log('error', e.message); connector.running = false; await diagIfNetwork(e.message).catch(() => {}); }
     setTimeout(loop, every);
   };
+  // Keep the process alive even if some request stops without settling.
+  setInterval(() => {}, 1 << 30);
   loop();
 }

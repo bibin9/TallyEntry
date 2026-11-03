@@ -1,8 +1,9 @@
 @echo off
 rem Tests the connection to TallyPrime and the cloud, and shows the latest log lines.
+rem   check.cmd --debug   also prints the network details and a fetch() comparison for support.
 net session >nul 2>&1
 if errorlevel 1 (
-  powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0'"
+  if "%~1"=="" (powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0'") else (powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0' -ArgumentList '%*'")
   exit /b
 )
 set "QE_DATA=%ProgramData%\QuickEntry"
@@ -10,7 +11,7 @@ set "QE_NODE=node.exe"
 where node.exe >nul 2>&1 || set "QE_NODE=%ProgramFiles%\nodejs\node.exe"
 set "QE_FLAGS="
 "%QE_NODE%" --use-system-ca -e 0 >nul 2>&1 && set "QE_FLAGS=--use-system-ca"
-"%QE_NODE%" %QE_FLAGS% "%~dp0connector\index.js" --config "%QE_DATA%\config.json" --check
+"%QE_NODE%" %QE_FLAGS% "%~dp0connector\index.js" --config "%QE_DATA%\config.json" --check %*
 echo.
 powershell -NoProfile -Command "$t = Get-ScheduledTask -TaskName 'QuickEntry Connector' -ErrorAction SilentlyContinue; if ($t) { 'Background task: ' + $t.State } else { 'Background task: NOT INSTALLED' }"
 echo.
