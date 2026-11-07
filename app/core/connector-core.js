@@ -5,7 +5,7 @@
 import * as TX from './tally-xml.js';
 import { DEFAULT_TAX } from './vat.js';
 
-export const CONNECTOR_VERSION = '0.2.1';
+export const CONNECTOR_VERSION = '0.2.2';
 
 export const DEFAULT_LEDGER_MAP = {
   salesLedger: 'Sales - Local', purchaseLedger: 'Purchase - Local',
@@ -82,7 +82,7 @@ export class Connector {
           if (!this.writeCodes) { m.code = 'G:' + m.tallyGuid; continue; }
           const prefix = kind === 'items' ? CODE_PREFIX.item : CODE_PREFIX[m.role] || 'L';
           const code = this._nextCode(prefix, existing);
-          const res = TX.parseImportResponse(await this._tally(TX.setMasterCodeRequest(this.company, kind === 'items' ? 'STOCKITEM' : 'LEDGER', m.name, code)));
+          const res = TX.parseImportResponse(await this._tally(TX.setMasterCodeRequest(this.company, kind === 'items' ? 'STOCKITEM' : 'LEDGER', m.name, code, kind === 'items' ? m.group : m.parent)));
           if (res.errors || !(res.altered || res.created)) { this.log('warn', `Could not write code to ${m.name}: ${res.messages.join('; ')}. Using GUID.`); m.code = 'G:' + m.tallyGuid; }
           else { m.code = code; existing.push(code); }
         }

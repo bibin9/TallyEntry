@@ -36,7 +36,7 @@ function Fail($msg) { Write-Host "  ERROR $msg" -ForegroundColor Red; exit 1 }
 function WriteText($path, $text) { [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false))) }
 
 Say ''
-Say 'QuickEntry connector setup (version 0.2.1)'
+Say 'QuickEntry connector setup (version 0.2.2)'
 Say '--------------------------'
 
 # 1. Administrator rights
@@ -44,7 +44,7 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not $admin) { Fail 'Please run this as administrator (right-click install.cmd > Run as administrator).' }
 
 # 2. Source files present
-foreach ($f in @('connector\index.js', 'app\core\connector-core.js', 'app\core\tally-xml.js')) {
+foreach ($f in @('connector\index.js', 'app\core\connector-core.js', 'app\core\tally-xml.js', 'app\core\tally-codec.js')) {
   if (-not (Test-Path (Join-Path $SourceRoot $f))) { Fail "Missing $f next to the installer. Unzip the whole package first." }
 }
 

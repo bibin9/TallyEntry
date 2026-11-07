@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Connector, CONNECTOR_VERSION } from '../app/core/connector-core.js';
 import { ledgersRequest } from '../app/core/tally-xml.js';
+import { decodeTally, encodeTally } from '../app/core/tally-codec.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i > 0 ? process.argv[i + 1] : d; };
@@ -74,7 +75,7 @@ function httpRequest(url, { method = 'GET', headers = {}, body, timeoutMs = 3000
     const req = lib.request(u, { method, headers: { ...headers, ...(data ? { 'Content-Length': data.length } : {}) }, agent: false }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
-      res.on('end', () => finish(resolve, { status: res.statusCode, ok: res.statusCode >= 200 && res.statusCode < 300, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('end', () => { const buf = Buffer.concat(chunks); finish(resolve, { status: res.statusCode, ok: res.statusCode >= 200 && res.statusCode < 300, buf, text: buf.toString('utf8') }); });
       res.on('error', (e) => finish(reject, e));
     });
     const timer = setTimeout(() => {
@@ -87,12 +88,17 @@ function httpRequest(url, { method = 'GET', headers = {}, body, timeoutMs = 3000
   });
 }
 
+// Tally may answer in UTF-8, UTF-16 or Windows-1252 (see tally-codec.js). Requests are sent in
+// the encoding of the last answer, so names with special characters match in Tally.
+let tallyCharset = 'utf-8';
 async function tally(xml) {
   const r = await httpRequest(cfg.tallyUrl || 'http://localhost:9000', {
-    method: 'POST', body: xml, timeoutMs: (cfg.tallyTimeoutSec || 60) * 1000,
-    headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+    method: 'POST', body: encodeTally(xml, tallyCharset), timeoutMs: (cfg.tallyTimeoutSec || 60) * 1000,
+    headers: { 'Content-Type': `text/xml; charset=${tallyCharset === 'windows-1252' ? 'windows-1252' : 'utf-8'}` },
   });
-  return r.text;
+  const d = decodeTally(r.buf);
+  if (d.charset !== tallyCharset && d.charset !== 'utf-8') tallyCharset = d.charset === 'utf-16le' ? 'utf-8' : d.charset;
+  return d.text;
 }
 
 // Turn a network error into a plain reason: DNS, firewall, proxy, certificate or time-out.
