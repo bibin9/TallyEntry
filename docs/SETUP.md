@@ -141,7 +141,7 @@ Use this when each salesperson takes stock out in a van and sells from it.
    * Evening: Home > **Return from Van** > **Return everything in the van**, change any quantity that is short, save. Posts a Stock Journal back to the office godown. A van not returned by the next day is flagged on the home screen and on **Van stock**.
 4. **Van stock** (Home) shows what is in every van and the office store. Office store = Tally's total stock − stock in vans − van sales not in Tally yet.
 
-To give a van to someone else (leave, new joiner), change its salesperson in More > Van stock; the stock stays with the van.
+To give a van to someone else (leave, new joiner), change its salesperson in More > Van stock; the stock stays with the van. The full user guide is in docs/VAN-STOCK.md.
 
 Database: run the updated `relay/supabase/schema.sql` once (it adds the `van_moves` table and the `stock.vans` operation; re-running is safe).
 
@@ -162,6 +162,23 @@ Use a copy of the client's company. Each line checks one point marked `VERIFY` i
 11. Post a sale in Tally itself: within one sync the app shows the customer's new balance and the item's new stock.
 
 Record the TallyPrime release tested and any changes, then mark the integration as verified in the README.
+
+## Upgrading an existing installation (for example to van stock, connector 0.3.0)
+
+Do these in order. Each step is safe to repeat.
+
+1. **Database (Supabase):** SQL Editor, paste all of the new `relay/supabase/schema.sql`, run. It only adds what is missing (for van stock: the `van_moves` table and the `stock.vans` operation); existing data stays.
+2. **App and API (Cloudflare):** merge the change to `main`. Workers Builds deploys it in about a minute. Phones pick up the new app the next time it is opened (an entry being typed is not interrupted).
+3. **Office PC:** copy the new office setup package (`QuickEntry-Office-Setup-v1.3.zip`) to the PC, unzip it, open `connector\windows` and double-click `install.cmd`. It upgrades the program files and keeps the company name, address and connector key. Then run `check.cmd`: the first line must say **version 0.3.0** and every line **OK**.
+4. **New features that need switching on** (van stock): set up Tally first (section 5a), then switch the feature on in the app.
+
+An older connector cannot post van issues or returns: they show as **Failed** in the sync check. Update the office PC before switching van stock on. Failed entries are retried automatically for a few hours; after that, open the entry and tap **Retry now**.
+
+### Moving the connector to a different office PC
+
+1. On the old PC: `C:\Program Files\QuickEntry\uninstall.cmd` (stops the background task).
+2. On the new PC: install TallyPrime with the same company, load `tdl\QuickEntry.tdl` (section 3), then run `install.cmd` from the latest office package. Enter the same company name and app address. For the key, use the company's connector key; if it is not at hand, create a new one in the owner screen (`/owner.html` > the company > **New connector key**), which also stops the old PC's key.
+3. Run `check.cmd`. Nothing is lost by the move: entries wait on the server until the new PC posts them, and the connector's sync position is stored on the server, not on the PC.
 
 ## Self-hosted alternative
 
