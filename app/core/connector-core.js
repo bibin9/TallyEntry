@@ -6,7 +6,7 @@ import * as TX from './tally-xml.js';
 import { DEFAULT_TAX } from './vat.js';
 import { TYPES, vanConfig } from './types.js';
 
-export const CONNECTOR_VERSION = '0.2.2';
+export const CONNECTOR_VERSION = '0.3.0';
 
 export const DEFAULT_LEDGER_MAP = {
   salesLedger: 'Sales - Local', purchaseLedger: 'Purchase - Local',
