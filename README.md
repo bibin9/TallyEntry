@@ -72,4 +72,5 @@ The browser tests need Playwright with Chromium. `npm i -D pg` is needed only fo
 - **No duplicates.** Every transaction has a UUID made on the device and a version number. The server ignores versions it already has. Before creating a voucher, the connector looks for the UUID in Tally (QE Txn ID), so a lost reply cannot cause a second voucher. Edits alter the mapped voucher.
 - **Conflicts.** If the voucher's AlterID in Tally changed since the last sync, the app's edit is held as Conflict until the office chooses (BRD Q6; default "Tally wins").
 - **Nothing lost.** Everything is written to IndexedDB first. Unsynced entries are never removed; synced ones are kept for 2 days (configurable).
+- **Van stock.** Optional: each salesperson's van is a Tally godown. Issue to van and end-of-day return post as Stock Journals; a salesperson's invoices take stock from their van. See docs/SETUP.md, section 5a.
 - **Configurable tax.** Rates, labels, currency, inclusive pricing and rounding are settings.

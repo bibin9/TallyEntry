@@ -264,4 +264,92 @@ export function scenarios(test, makeBackend) {
     assert.equal(r.error, null);
     assert.equal((await status(ctx, x.id)).status, 'synced');
   });
+
+  // ------------------------------------------------------------ van stock
+  const VANS = { enabled: true, officeGodown: 'Main Location', vans: [{ id: 'V1', name: 'Van 1', godown: 'Van 1', user: 'AHM' }, { id: 'V9', name: 'Van 9', godown: 'Van 9', user: 'BAD' }] };
+  const move = (type, van, item, qty, over = {}) => ({ id: uuid(), version: 1, type, number: type.toUpperCase() + '-T-' + Math.floor(Math.random() * 1e6), date: today, van,
+    lines: [{ itemCode: item.code, qty }], ...over });
+
+  test('van stock: issue moves stock office -> van, van sales reduce only the van, the return goes back to the office', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    await ctx.device.saveSettings({ vanStock: VANS });
+    const item = ctx.m.items[0], name = item.name;
+    const opening = ctx.sim.stockOf(name);
+    // Morning: 30 to Van 1.
+    const issue = move('vi', 'V1', item, 30);
+    await ctx.device.push([issue]);
+    await ctx.conn.runOnce();
+    assert.equal((await status(ctx, issue.id)).status, 'synced');
+    assert.equal(ctx.sim.godownStock(name, 'Van 1'), 30);
+    assert.equal(ctx.sim.godownStock(name, 'Main Location'), opening - 30);
+    assert.equal(ctx.sim.stockOf(name), opening, 'a transfer does not change total stock');
+    let vs = await ctx.device.vanStock();
+    assert.equal(Number(vs.vans.V1.items[item.code]), 30);
+    assert.equal(vs.vans.V1.lastIssue.slice(0, 10), today);
+    // A van sale: before it reaches Tally it shows as pending, after that Tally's total includes it.
+    const cust = ctx.m.ledgers.find((l) => l.role === 'customer');
+    const sale = { ...inv(ctx), van: 'V1', lines: [{ itemCode: item.code, qty: 25, rate: 42, discPct: 0, taxCode: 'SR' }] };
+    await ctx.device.push([sale]);
+    vs = await ctx.device.vanStock();
+    assert.equal(Number(vs.vans.V1.items[item.code]), 5);
+    assert.equal(Number(vs.pending[item.code]), 25);
+    await ctx.conn.runOnce();
+    assert.equal((await status(ctx, sale.id)).status, 'synced');
+    assert.equal(ctx.sim.godownStock(name, 'Van 1'), 5);
+    assert.equal(ctx.sim.godownStock(name, 'Main Location'), opening - 30, 'the office store is not touched by a van sale');
+    vs = await ctx.device.vanStock();
+    assert.equal(vs.pending[item.code] ?? 0, 0);
+    // Evening: the 5 left come back.
+    const ret = move('vr', 'V1', item, 5);
+    await ctx.device.push([ret]);
+    await ctx.conn.runOnce();
+    assert.equal((await status(ctx, ret.id)).status, 'synced');
+    assert.equal(ctx.sim.godownStock(name, 'Van 1'), 0);
+    assert.equal(ctx.sim.godownStock(name, 'Main Location'), opening - 25);
+    vs = await ctx.device.vanStock();
+    assert.equal(vs.vans.V1.items[item.code], undefined);
+    assert.equal(vs.vans.V1.lastReturn.slice(0, 10), today);
+    void cust;
+  });
+
+  test('van stock: an edit replaces the old quantities and a cancelled issue gives the stock back', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    await ctx.device.saveSettings({ vanStock: VANS });
+    const item = ctx.m.items[1];
+    const issue = move('vi', 'V1', item, 10);
+    await ctx.device.push([issue]);
+    await ctx.device.push([{ ...issue, version: 2, lines: [{ itemCode: item.code, qty: 12 }] }]);
+    assert.equal(Number((await ctx.device.vanStock()).vans.V1.items[item.code]), 12);
+    await ctx.conn.runOnce();
+    assert.equal(ctx.sim.godownStock(item.name, 'Van 1'), 12);
+    await ctx.device.push([{ ...issue, version: 3, lines: [{ itemCode: item.code, qty: 12 }], cancelled: true }]);
+    assert.equal((await ctx.device.vanStock()).vans.V1?.items[item.code], undefined);
+    await ctx.conn.runOnce();
+    assert.equal(ctx.sim.godownStock(item.name, 'Van 1'), 0);
+  });
+
+  test('van stock: a godown missing in Tally fails with Tally\'s reason; a van with no godown set says so', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    await ctx.device.saveSettings({ vanStock: VANS });
+    const item = ctx.m.items[2];
+    const a = move('vi', 'V9', item, 1), b = move('vi', 'V404', item, 1);
+    await ctx.device.push([a, b]);
+    await ctx.conn.runOnce();
+    const sa = await status(ctx, a.id), sb = await status(ctx, b.id);
+    assert.equal(sa.status, 'failed');
+    assert.match(sa.error, /Godown 'Van 9' does not exist/);
+    assert.equal(sb.status, 'failed');
+    assert.match(sb.error, /no Tally godown/);
+  });
+
+  test('van stock off: invoices post exactly as before, with no godown', async (t) => {
+    const ctx = await setup(); t.after(ctx.cleanup);
+    let xml = '';
+    const conn = new Connector({ tally: async (x) => { if (x.includes('<VOUCHER ')) xml = x; return ctx.sim.handle(x); }, relay: ctx.relay, company: ctx.sim.company });
+    const x = inv(ctx);
+    await ctx.device.push([x]);
+    await conn.runOnce();
+    assert.equal((await status(ctx, x.id)).status, 'synced');
+    assert.ok(xml && !xml.includes('GODOWNNAME'));
+  });
 }

@@ -4,7 +4,7 @@
 import { db, requestPersistence } from './db.js';
 import { HttpApi, NetworkError } from './api.js';
 import { SyncEngine } from './sync.js';
-import { TYPES, TYPE_ORDER } from '../core/types.js';
+import { TYPES, TYPE_ORDER, VAN_TYPES, vanConfig, vanForUser, vanMoves } from '../core/types.js';
 import { calcDoc, rateFor } from '../core/vat.js';
 import { defaultSettings } from '../core/defaults.js';
 import { docModel, docHtml, docPdf, sharePdf, printDoc, downloadBlob, fileName, money, fdate } from './docs.js';
@@ -104,10 +104,62 @@ async function loadTxns() {
 
 function ctx() { return { settings: S.settings, ledgerByCode: S.ledgerByCode, itemByCode: S.itemByCode }; }
 
+// ------------------------------------------------------------------ van stock
+const vans = () => vanConfig(S.settings);
+const vanName = (id) => vans().vans.find((v) => v.id === id)?.name || id || '';
+const isTransfer = (type) => TYPES[type]?.kind === 'transfer';
+const r3 = (x) => Math.round(x * 1000) / 1000;
+
+/** Van stock from the server (last sync) plus this phone's entries the server has not seen yet. */
+async function vanStockNow() {
+  const base = structuredClone((await db.meta('vanStock')) || { vans: {}, pending: {} });
+  base.vans ||= {}; base.pending ||= {};
+  for (const t of S.txns) {
+    if (t.pushedVersion) continue; // the server already counts it (an unsent edit is counted at its sent version)
+    for (const m of vanMoves(t)) {
+      const v = (base.vans[m.van] ||= { items: {}, lastIssue: null, lastReturn: null });
+      v.items[m.itemCode] = r3((Number(v.items[m.itemCode]) || 0) + m.qty);
+      if (t.type === 'si') base.pending[m.itemCode] = r3((Number(base.pending[m.itemCode]) || 0) - m.qty);
+    }
+    const v = t.van && base.vans[t.van];
+    if (v && t.type === 'vi' && !t.cancelled && (!v.lastIssue || t.date > v.lastIssue)) v.lastIssue = t.date;
+    if (v && t.type === 'vr' && !t.cancelled && (!v.lastReturn || t.date > v.lastReturn)) v.lastReturn = t.date;
+  }
+  return base;
+}
+const vanQty = (vs, van, code) => Number(vs.vans[van]?.items?.[code]) || 0;
+/** Office store = Tally's total stock - everything in vans - van sales Tally has not got yet. */
+function officeQty(vs, code) {
+  const it = S.itemByCode.get(code);
+  if (it?.stock == null) return null;
+  let q = Number(it.stock) - (Number(vs.pending[code]) || 0);
+  for (const v of Object.values(vs.vans)) q -= Number(v.items?.[code]) || 0;
+  return r3(q);
+}
+/** A van still holding stock from an earlier day (not returned at end of day). */
+function vanOverdue(vs, id) {
+  const v = vs.vans[id];
+  if (!v || !Object.values(v.items || {}).some((q) => Number(q) > 0)) return null;
+  const since = v.lastIssue || v.lastReturn;
+  return since && since < todayIso() ? since : null;
+}
+
+/** How much of each item this draft may take from its van: the van's stock plus what the saved
+ *  version of this same entry already took (an edit can reuse it). */
+function availableFor(d, vs) {
+  const out = {};
+  if (!d.van) return out;
+  for (const [code, q] of Object.entries(vs.vans[d.van]?.items || {})) out[code] = Number(q) || 0;
+  const saved = d.id && S.txns.find((t) => t.id === d.id);
+  if (saved) for (const m of vanMoves(saved)) if (m.van === d.van) out[m.itemCode] = r3((out[m.itemCode] || 0) - m.qty);
+  return out;
+}
+
 let reloadingForUpdate = false, pendingUpdate = false;
 function route() {
   const [view, ...rest] = (location.hash.slice(1) || 'home').split('/');
   if (pendingUpdate && !['new', 'edit'].includes(view)) { reloadingForUpdate = true; return location.reload(); }
+  if (view !== 'vansettings') S.vanEdit = null;
   S.view = view; S.params = rest;
   render();
 }
@@ -143,10 +195,17 @@ function badge(t) {
 
 function txnRow(t) {
   const ty = TYPES[t.type];
+  if (ty.kind === 'transfer') {
+    const qty = r3((t.lines || []).reduce((a, l) => a + (Number(l.qty) || 0), 0));
+    const what = `${qty} unit${qty === 1 ? '' : 's'}, ${(t.lines || []).length} item${(t.lines || []).length === 1 ? '' : 's'}`;
+    return `<button class="row" data-go="detail/${t.id}"><span class="tag t-${t.type}">${ty.icon}</span>
+    <span class="main"><span class="p">${esc(ty.dir === 'out' ? 'To ' : 'From ')}${esc(vanName(t.van))}</span><span class="s">${esc(t.number)} · ${fdate(t.date)}</span></span>
+    <span class="a">${t.cancelled ? `<s>${what}</s>` : what}<br>${badge(t)}</span></button>`;
+  }
   const party = S.ledgerByCode.get(t.partyCode)?.name || t.partyCode;
   const total = ty.kind === 'items' ? calcDoc(t.lines, S.settings.tax).total : Number(t.amount) || 0;
   return `<button class="row" data-go="detail/${t.id}"><span class="tag t-${t.type}">${ty.icon}</span>
-    <span class="main"><span class="p">${esc(party)}</span><span class="s">${esc(t.number)} · ${fdate(t.date)}</span></span>
+    <span class="main"><span class="p">${esc(party)}</span><span class="s">${esc(t.number)} · ${fdate(t.date)}${t.van ? ' · ' + esc(vanName(t.van)) : ''}</span></span>
     <span class="a">${t.cancelled ? `<s>${money(total, S.settings.tax.currency)}</s>` : money(total, S.settings.tax.currency)}<br>${badge(t)}</span></button>`;
 }
 
@@ -160,10 +219,21 @@ VIEWS.home = async () => {
   const sum = (type) => tToday.filter((t) => t.type === type).reduce((s, t) => s + (TYPES[t.type].kind === 'items' ? calcDoc(t.lines, S.settings.tax).total : Number(t.amount) || 0), 0);
   const cur = S.settings.tax.currency;
   const noMasters = !S.ledgers.length;
+  const vc = vans(), admin = S.me.role === 'admin', myVan = vanForUser(S.settings, S.me.code);
+  let vanHtml = '';
+  if (vc.enabled) {
+    const vs = await vanStockNow();
+    const late = vc.vans.filter((v) => (admin || v.id === myVan?.id) && vanOverdue(vs, v.id));
+    vanHtml = `${late.map((v) => `<div class="card warn">⚠ <b>${esc(v.name)}</b> still has stock from ${fdate(vanOverdue(vs, v.id))}. Every van should be returned to the office store at the end of the day.${admin ? ` <button class="link" data-go="new/vr/${esc(v.id)}">Make the return</button>` : ''}</div>`).join('')}
+    <div class="tiles">${admin ? VAN_TYPES.map((k) => `<button class="tile" data-go="new/${k}"><span class="tag t-${k}">${TYPES[k].icon}</span>${esc(TYPES[k].name)}</button>`).join('') : ''}
+      ${admin || myVan ? `<button class="tile" data-go="vans"><span class="tag t-vs">VS</span>${admin ? 'Van stock' : 'My van stock'}</button>` : ''}</div>
+    ${myVan ? `<p class="small muted">You sell from <b>${esc(myVan.name)}</b>. Invoices take stock from your van.</p>` : ''}`;
+  }
   return `${header(S.settings.company.name || 'QuickEntry')}
   <main>
     ${noMasters ? `<div class="card warn">No customers or items on this device yet. Connect to the internet and tap <b>Sync now</b> once to download them from Tally.</div>` : ''}
     <div class="tiles">${TYPE_ORDER.map((k) => `<button class="tile" data-go="new/${k}"><span class="tag t-${k}">${TYPES[k].icon}</span>New ${esc(TYPES[k].short)}</button>`).join('')}</div>
+    ${vanHtml}
     <div class="card"><div class="sec">Today</div>
       <div class="kpis"><div><div class="lab">Sales</div><div class="val">${money(sum('si'), cur, 0)}</div></div>
       <div><div class="lab">Receipts</div><div class="val">${money(sum('rc'), cur, 0)}</div></div>
@@ -180,8 +250,9 @@ VIEWS.list = async () => {
   const f = S.params[0] || 'all';
   const q = (S.listQ || '').toLowerCase();
   let list = S.txns.filter((t) => f === 'all' || t.status === f || t.type === f);
-  if (q) list = list.filter((t) => `${t.number} ${S.ledgerByCode.get(t.partyCode)?.name || ''}`.toLowerCase().includes(q));
-  const chips = [['all', 'All'], ['pending', 'Pending'], ['sent', 'Waiting for Tally'], ['failed', 'Failed'], ['conflict', 'Conflict'], ['synced', 'Synced'], ...TYPE_ORDER.map((k) => [k, TYPES[k].short])];
+  if (q) list = list.filter((t) => `${t.number} ${S.ledgerByCode.get(t.partyCode)?.name || ''} ${t.van ? vanName(t.van) : ''}`.toLowerCase().includes(q));
+  const chips = [['all', 'All'], ['pending', 'Pending'], ['sent', 'Waiting for Tally'], ['failed', 'Failed'], ['conflict', 'Conflict'], ['synced', 'Synced'], ...TYPE_ORDER.map((k) => [k, TYPES[k].short]),
+    ...(vans().enabled || S.txns.some((t) => isTransfer(t.type)) ? VAN_TYPES.map((k) => [k, TYPES[k].short]) : [])];
   return `${header('Transactions')}<main>
     <input class="search" id="listq" placeholder="Search number or customer" value="${esc(S.listQ || '')}" autocomplete="off">
     <div class="chips">${chips.map(([k, l]) => `<button class="chip ${k === f ? 'on' : ''}" data-go="list/${k}">${l}</button>`).join('')}</div>
@@ -192,8 +263,11 @@ VIEWS.list = async () => {
 // ---------------- transaction form
 function blankDraft(type) {
   const t = TYPES[type];
+  if (t.kind === 'transfer') return { type, date: todayIso(), van: S.params[1] || (vans().vans.length === 1 ? vans().vans[0].id : ''), lines: [], narration: '' };
   const d = { type, date: todayIso(), partyCode: S.params[1] || '', narration: '' };
   if (t.kind === 'items') d.lines = [];
+  // A salesperson with a van sells from it; the office sells from the office store unless it picks a van.
+  if (type === 'si') { const v = vanForUser(S.settings, S.me.code); if (v) d.van = v.id; }
   if (type === 'rc') Object.assign(d, { amount: '', mode: S.settings.receiptModes[0], accountCode: S.ledgers.find((l) => l.role === 'account')?.code || '', reference: '', against: '' });
   if (type === 'so') d.dueDate = '';
   if (type === 'pi') d.supplierInvNo = '';
@@ -201,7 +275,9 @@ function blankDraft(type) {
 }
 
 VIEWS.new = async () => {
+  if (!TYPES[S.params[0]]) return `${header('Not found', 'home')}<main><p class="muted">Unknown entry type.</p></main>`;
   if (!S.draft || S.draft._for !== location.hash) S.draft = { ...blankDraft(S.params[0]), _for: location.hash };
+  S.vs = await vanStockNow();
   return formHtml();
 };
 VIEWS.edit = async () => {
@@ -211,11 +287,68 @@ VIEWS.edit = async () => {
     if (t.cancelled) return `${header(t.number, 'detail/' + t.id)}<main><p>This entry is cancelled and cannot be edited. Make a new entry instead.</p></main>`;
     S.draft = { ...structuredClone(t), _for: location.hash };
   }
+  S.vs = await vanStockNow();
   return formHtml();
 };
 
+/** Stock note for an item line: van stock for van sales and returns, office store otherwise. */
+function stockNote(d, code, qty) {
+  const vc = vans(), it = S.itemByCode.get(code);
+  if (d.type === 'pi' || d.type === 'so') return it?.stock != null ? { text: `Stock ${it.stock}`, short: false } : null;
+  if (vc.enabled && S.vs) {
+    if (d.van && d.type !== 'vi') {
+      const avail = availableFor(d, S.vs)[code] || 0;
+      const want = (d.lines || []).filter((l) => l.itemCode === code).reduce((a, l) => a + (Number(l.qty) || 0), 0);
+      return { text: `In ${vanName(d.van)}: ${avail}${want > avail ? ' (not enough)' : ''}`, short: want > avail };
+    }
+    const off = officeQty(S.vs, code);
+    if (off == null) return null;
+    const inVan = d.type === 'vi' && d.van ? ` · in van ${vanQty(S.vs, d.van, code)}` : '';
+    return { text: `Office store ${off}${Number(qty) > off ? ' (not enough)' : ''}${inVan}`, short: Number(qty) > off };
+  }
+  if (it?.stock == null) return null;
+  const short = Number(qty) > it.stock;
+  return { text: `Stock ${it.stock}${short ? ' (not enough)' : ''}`, short };
+}
+
+function transferFormHtml() {
+  const d = S.draft, t = TYPES[d.type], vc = vans();
+  const editing = !!d.id;
+  const vanItems = d.van ? Object.entries(availableFor(d, S.vs)).filter(([, q]) => q > 0) : [];
+  const total = r3(d.lines.reduce((a, l) => a + (Number(l.qty) || 0), 0));
+  const body = `<label>Date</label><input type="date" data-f="date" value="${esc(d.date)}">
+    <label>${t.dir === 'out' ? 'Issue to van' : 'Return from van'}</label>
+    <select data-f="van"><option value="">Choose a van</option>${vc.vans.map((v) => `<option value="${esc(v.id)}" ${v.id === d.van ? 'selected' : ''}>${esc(v.name)}${v.user ? ' · ' + esc(v.user) : ''}</option>`).join('')}</select>
+    ${!vc.vans.length ? '<div class="err small">No vans are set up yet. Add them in More &gt; Van stock.</div>' : ''}
+    <p class="small muted">${t.dir === 'out' ? 'Moves stock from the office store into the van. Office stock goes down now; the salesperson then sells from the van.' : 'Moves what is left in the van back into the office store. Do this at the end of every day.'}</p>
+    ${t.dir === 'in' && d.van ? `<button class="btn ghost full" data-act="returnall">Return everything in ${esc(vanName(d.van))} (${vanItems.length} item${vanItems.length === 1 ? '' : 's'})</button>` : ''}
+    <div class="sec">Items</div>${d.lines.map((l, i) => {
+      const it = S.itemByCode.get(l.itemCode) || { name: l.itemCode, unit: '' };
+      const note = stockNote(d, l.itemCode, l.qty);
+      const bad = qtyProblem(l.qty);
+      return `<div class="line" data-line="${i}"><div class="lh"><b>${esc(it.name)}</b>${note ? `<span class="stk ${note.short ? 'low' : ''}">${esc(note.text)}</span>` : ''}<button class="x" data-act="delline" data-i="${i}" aria-label="Remove">✕</button></div>
+        <div class="grid4"><div><label>Qty (${esc(it.unit)})</label><input inputmode="decimal" data-l="qty" data-i="${i}" value="${esc(l.qty)}"></div></div>
+        <div class="lt">${bad ? `<span class="err">${esc(bad)}</span>` : ''}</div></div>`;
+    }).join('')}
+    <button class="btn ghost full" data-act="additem">+ Add item</button>
+    <div class="totals"><div class="grand"><span>Total quantity</span><span id="t-qty">${total}</span></div></div>
+    <label>Note (optional)</label><textarea data-f="narration" rows="2">${esc(d.narration || '')}</textarea>`;
+  return `${header((editing ? 'Edit ' : '') + t.name, editing ? 'detail/' + d.id : 'home')}<main class="form">
+    ${editing && d.syncedVersion ? `<div class="card info small">Already in Tally. Saving will update the same Stock Journal at the next sync.</div>` : ''}
+    <div class="card">${body}</div><div id="formerr" class="err"></div>
+    <div class="savebar"><button class="btn full" data-act="save">Save${isOffline() ? ' (offline)' : ''}</button></div></main>`;
+}
+
+function qtyProblem(v) {
+  const q = v === '' || v == null ? NaN : Number(v);
+  if (Number.isNaN(q)) return 'Enter a quantity.';
+  if (!(q > 0)) return 'Quantity must be more than zero.';
+  return null;
+}
+
 function formHtml() {
   const d = S.draft, t = TYPES[d.type];
+  if (t.kind === 'transfer') return transferFormHtml();
   const party = S.ledgerByCode.get(d.partyCode);
   const tax = S.settings.tax, cur = tax.currency;
   const editing = !!d.id;
@@ -223,14 +356,20 @@ function formHtml() {
     <label>${t.party === 'supplier' ? 'Supplier' : 'Customer'}</label>
     <button class="picker ${party ? '' : 'empty'}" data-act="pickparty">${party ? `<b>${esc(party.name)}</b><span class="s">${esc(party.code)}${party.phone ? ' · ' + esc(party.phone) : ''}${party.trn ? ` · ${tax.taxIdLabel} ${esc(party.trn)}` : ''}</span>` : `Tap to choose ${t.party}`}</button>
     ${party ? partyInfoHtml(party, d) : ''}`;
+  if (d.type === 'si' && vans().enabled) {
+    const mine = vanForUser(S.settings, S.me.code);
+    body += S.me.role === 'admin'
+      ? `<label>Sell from</label><select data-f="van"><option value="">Office store</option>${vans().vans.map((v) => `<option value="${esc(v.id)}" ${v.id === d.van ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select>`
+      : `<label>Sell from</label><div class="small"><b>${esc(d.van ? vanName(d.van) : 'Office store')}</b>${mine && d.van !== mine.id ? ' (made from a different van)' : ''}</div>`;
+  }
   if (d.type === 'so') body += `<label>Delivery date</label><input type="date" data-f="dueDate" value="${esc(d.dueDate || '')}">`;
   if (d.type === 'pi') body += `<label>Supplier invoice no.</label><input data-f="supplierInvNo" value="${esc(d.supplierInvNo || '')}" placeholder="As printed on the supplier's invoice">`;
   if (t.kind === 'items') {
     const c = calcDoc(d.lines, tax);
     body += `<div class="sec">Items</div>` + c.lines.map((l, i) => {
       const it = S.itemByCode.get(l.itemCode) || { name: l.itemCode, unit: '' };
-      const short = it.stock != null && d.type !== 'pi' && Number(l.qty) > it.stock;
-      return `<div class="line" data-line="${i}"><div class="lh"><b>${esc(it.name)}</b>${it.stock != null ? `<span class="stk ${short ? 'low' : ''}">Stock ${esc(it.stock)}${short ? ' (not enough)' : ''}</span>` : ''}<button class="x" data-act="delline" data-i="${i}" aria-label="Remove">✕</button></div>
+      const note = stockNote(d, l.itemCode, l.qty);
+      return `<div class="line" data-line="${i}"><div class="lh"><b>${esc(it.name)}</b>${note ? `<span class="stk ${note.short ? 'low' : ''}">${esc(note.text)}</span>` : ''}<button class="x" data-act="delline" data-i="${i}" aria-label="Remove">✕</button></div>
         <div class="grid4"><div><label>Qty (${esc(it.unit)})</label><input inputmode="decimal" data-l="qty" data-i="${i}" value="${esc(l.qty)}"></div>
         <div><label>Rate</label><input inputmode="decimal" data-l="rate" data-i="${i}" value="${esc(l.rate)}" ${S.settings.allowRateEdit ? '' : 'readonly'}></div>
         <div><label>Disc %</label><input inputmode="decimal" data-l="discPct" data-i="${i}" value="${esc(l.discPct || '')}"></div>
@@ -310,20 +449,56 @@ function lineTotalHtml(l, cur) {
 }
 
 function updateTotals() {
+  if (isTransfer(S.draft.type)) {
+    const q = $('#t-qty'); if (q) q.textContent = r3(S.draft.lines.reduce((a, l) => a + (Number(l.qty) || 0), 0));
+    S.draft.lines.forEach((l, i) => {
+      const lt = $(`[data-line="${i}"] .lt`), p = qtyProblem(l.qty); if (lt) lt.innerHTML = p ? `<span class="err">${esc(p)}</span>` : '';
+    });
+    refreshStockNotes();
+    return;
+  }
   const c = calcDoc(S.draft.lines, S.settings.tax), cur = S.settings.tax.currency;
   if (!$('#t-total')) return;
   const bad = S.draft.lines.some(lineProblem);
   $('#t-taxable').textContent = bad ? '–' : money(c.taxable, cur); $('#t-tax').textContent = bad ? '–' : money(c.tax, cur); $('#t-total').textContent = bad ? '–' : money(c.total, cur);
   c.lines.forEach((l, i) => {
     const el = $(`[data-line="${i}"] .lt`); if (el) el.innerHTML = lineTotalHtml(l, cur);
-    const it = S.itemByCode.get(S.draft.lines[i]?.itemCode), stk = $(`[data-line="${i}"] .stk`);
-    if (stk && it?.stock != null && S.draft.type !== 'pi') { const short = Number(S.draft.lines[i].qty) > it.stock; stk.classList.toggle('low', short); stk.textContent = `Stock ${it.stock}${short ? ' (not enough)' : ''}`; }
   });
+  refreshStockNotes();
   const party = S.ledgerByCode.get(S.draft.partyCode), pi = $('#partyinfo');
   if (party && pi) pi.outerHTML = partyInfoHtml(party, S.draft) || '<div id="partyinfo"></div>';
 }
 
+function refreshStockNotes() {
+  S.draft.lines.forEach((l, i) => {
+    const stk = $(`[data-line="${i}"] .stk`), note = stockNote(S.draft, l.itemCode, l.qty);
+    if (stk && note) { stk.classList.toggle('low', note.short); stk.textContent = note.text; }
+  });
+}
+
+/** Van sales and returns cannot take more than the van holds (as of the last sync plus this phone's entries). */
+function vanShortage(d) {
+  if (!vans().enabled || !d.van || !['si', 'vr'].includes(d.type) || !S.vs) return null;
+  const avail = availableFor(d, S.vs), want = {};
+  for (const l of d.lines) want[l.itemCode] = (want[l.itemCode] || 0) + (Number(l.qty) || 0);
+  for (const [code, q] of Object.entries(want)) {
+    const have = avail[code] || 0;
+    if (q > have + 1e-9) {
+      const name = S.itemByCode.get(code)?.name || code;
+      return `${vanName(d.van)} has only ${have} of ${name}${d.type === 'si' ? '' : ' to return'}.${S.vs.at ? ` Van stock as of ${ago(S.vs.at)}; if the office just loaded the van, tap Sync now on the home screen first.` : ''}`;
+    }
+  }
+  return null;
+}
+
 function validate(d) {
+  if (isTransfer(d.type)) {
+    if (!d.date) return 'Enter the date.';
+    if (!d.van || !vans().vans.some((v) => v.id === d.van)) return 'Choose a van.';
+    if (!d.lines.length) return 'Add at least one item.';
+    for (const [i, l] of d.lines.entries()) { const p = qtyProblem(l.qty); if (p) return d.lines.length > 1 ? `Item ${i + 1}: ${p}` : p; }
+    return vanShortage(d);
+  }
   const t = TYPES[d.type];
   if (!d.date) return 'Enter the date.';
   if (!d.partyCode || !S.ledgerByCode.get(d.partyCode)) return `Choose a ${t.party}.`;
@@ -339,7 +514,7 @@ function validate(d) {
     if (['Cheque', 'PDC'].includes(d.mode) && !d.reference) return 'Enter the cheque number.';
   }
   if (d.type === 'pi' && !d.supplierInvNo) return "Enter the supplier's invoice number.";
-  return null;
+  return vanShortage(d);
 }
 
 async function nextNumber(type) {
@@ -355,7 +530,9 @@ async function saveDraft() {
   if (msg) { $('#formerr').textContent = msg; return; }
   const { _for, ...data } = d;
   if (TYPES[d.type].kind === 'items') data.lines = d.lines.map((l) => ({ itemCode: l.itemCode, qty: Number(l.qty), rate: Number(l.rate), discPct: Number(l.discPct) || 0, taxCode: l.taxCode }));
+  else if (isTransfer(d.type)) data.lines = d.lines.map((l) => ({ itemCode: l.itemCode, qty: Number(l.qty) }));
   else data.amount = Number(d.amount);
+  if (d.type === 'si' && !data.van) delete data.van;
   if (!data.number) data.number = await nextNumber(d.type);
   data.kind = TYPES[d.type].kind;
   const saved = await S.sync.saveTransaction(data);
@@ -392,7 +569,7 @@ function openPicker(kind, onPick) {
   res.addEventListener('click', (e) => { const b = e.target.closest('[data-pick]'); if (b) { closeSheet(); onPick(b.dataset.pick); } });
   el.querySelector('[data-close]').onclick = closeSheet;
   draw();
-  setTimeout(() => $('#pq').focus(), 50);
+  setTimeout(() => $('#pq')?.focus(), 50);
 }
 function closeSheet() { const el = $('#sheet'); el.hidden = true; el.innerHTML = ''; }
 
@@ -444,7 +621,7 @@ VIEWS.more = async () => {
     ${await signInCard(conn)}
     <div class="card"><div class="sec">${esc(tax.taxLabel)} and documents</div>
       <p class="small">Rates: ${tax.rates.map((r) => `${esc(r.label)}`).join(', ')} · Prices ${tax.pricesIncludeTax ? 'include' : 'exclude'} ${esc(tax.taxLabel)} · Rounding per ${tax.rounding === 'line' ? 'line' : 'document'} · ${esc(tax.currency)}</p>
-      ${S.me.role === 'admin' ? `<div class="btns"><button class="btn ghost" data-go="taxsettings">${esc(tax.taxLabel)} settings</button><button class="btn ghost" data-go="company">Company and documents</button><button class="btn ghost" data-go="ledgermap">Tally ledger names</button><button class="btn ghost" data-go="users">Users and passwords</button><button class="btn ghost" data-go="archive">Archive</button></div>
+      ${S.me.role === 'admin' ? `<div class="btns"><button class="btn ghost" data-go="taxsettings">${esc(tax.taxLabel)} settings</button><button class="btn ghost" data-go="company">Company and documents</button><button class="btn ghost" data-go="ledgermap">Tally ledger names</button><button class="btn ghost" data-go="users">Users and passwords</button><button class="btn ghost" data-go="vansettings">Van stock</button><button class="btn ghost" data-go="archive">Archive</button></div>
       <button class="btn full" data-go="synccheck" style="margin-top:8px">Tally sync check</button>` : '<p class="small muted">Set by the office admin.</p>'}</div>
     <div class="card small muted">QuickEntry for Tally 0.1. Data on this device: ${S.ledgers.length.toLocaleString()} ledgers, ${S.items.length.toLocaleString()} items, ${S.txns.length} transactions.</div>
   </main>`;
@@ -634,6 +811,62 @@ function keyMessage(k) {
   return `QuickEntry sign-in for ${k.name}\nOpen this link on your phone, then tap "Use live mode":\n${location.origin}/#connect=${k.key}\nKeep this message private.`;
 }
 
+// ---------------- van stock
+VIEWS.vans = async () => {
+  const vc = vans(), admin = S.me.role === 'admin', mine = vanForUser(S.settings, S.me.code);
+  if (!vc.enabled) return `${header('Van stock', 'home')}<main><p class="muted">Van stock is not switched on.${admin ? ' Switch it on in More &gt; Van stock.' : ''}</p></main>`;
+  const vs = await vanStockNow();
+  const shown = admin ? vc.vans : vc.vans.filter((v) => v.id === mine?.id);
+  const q = (S.vanQ || '').toLowerCase();
+  const name = (code) => S.itemByCode.get(code)?.name || code;
+  const unit = (code) => S.itemByCode.get(code)?.unit || '';
+  const vanCard = (v) => {
+    const rows = Object.entries(vs.vans[v.id]?.items || {}).filter(([c, n]) => Number(n) && (!q || name(c).toLowerCase().includes(q)))
+      .sort((a, b) => name(a[0]).localeCompare(name(b[0])));
+    const late = vanOverdue(vs, v.id);
+    return `<div class="card" data-van="${esc(v.id)}"><div class="sec">${esc(v.name)}${v.user ? ` <span class="muted small">· ${esc(v.user)}</span>` : ''}</div>
+      ${late ? `<div class="err small">Not returned since ${fdate(late)}. Return what is left to the office store at the end of every day.</div>` : ''}
+      ${rows.length ? `<table class="tbl"><tr><th>Item</th><th class="r">In van</th></tr>${rows.map(([c, n]) => `<tr><td>${esc(name(c))}</td><td class="r"><b>${esc(n)}</b> ${esc(unit(c))}</td></tr>`).join('')}</table>` : '<p class="muted small">Empty.</p>'}
+      ${admin ? `<div class="btns"><button class="btn sm" data-go="new/vi/${esc(v.id)}">Issue to van</button>${rows.length ? `<button class="btn sm ghost" data-go="new/vr/${esc(v.id)}">End-of-day return</button>` : ''}</div>` : ''}</div>`;
+  };
+  let office = '';
+  if (admin) {
+    const codes = new Set([...S.items.map((i) => i.code)]);
+    const list = [...codes].map((c) => [c, officeQty(vs, c), vc.vans.reduce((a, v) => a + vanQty(vs, v.id, c), 0)])
+      .filter(([c, o, inv]) => (inv || (o != null && o !== 0)) && (!q || name(c).toLowerCase().includes(q))).sort((a, b) => name(a[0]).localeCompare(name(b[0]))).slice(0, 200);
+    office = `<div class="card"><div class="sec">Office store (${esc(vc.officeGodown)})</div>
+      <table class="tbl"><tr><th>Item</th><th class="r">Office</th><th class="r">In vans</th></tr>${list.map(([c, o, inv]) => `<tr><td>${esc(name(c))}</td><td class="r"><b>${o ?? '–'}</b></td><td class="r">${r3(inv) || ''}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No stock.</td></tr>'}</table>
+      <p class="small muted">Office = Tally's total stock − stock in vans − van sales not yet in Tally. Tally stock as of the last sync.</p></div>`;
+  }
+  return `${header(admin ? 'Van stock' : 'My van stock', 'home')}<main>
+    <input class="search" id="vanq" placeholder="Search item" value="${esc(S.vanQ || '')}" autocomplete="off">
+    ${shown.length ? shown.map(vanCard).join('') : `<p class="muted">${admin ? 'No vans set up yet. Add them in More &gt; Van stock.' : 'No van is assigned to you. Ask the office.'}</p>`}
+    ${office}
+    <p class="small muted">Van stock as of ${vs.at ? ago(vs.at) : 'never'} (issues, returns and van sales from every phone), plus entries on this phone not sent yet.</p></main>`;
+};
+
+VIEWS.vansettings = async () => {
+  if (S.me.role !== 'admin') return `${header('Van stock', 'more')}<main><p class="muted">Only an office admin can change this.</p></main>`;
+  const vc = S.vanEdit || (S.vanEdit = structuredClone(vans()));
+  let users = null;
+  try { users = (await S.api.users()).filter((u) => u.active); } catch { /* offline: type the user code */ }
+  const userSel = (v, i) => users
+    ? `<select data-vs="user" data-i="${i}"><option value="">Not assigned</option>${users.map((u) => `<option value="${esc(u.code)}" ${u.code === v.user ? 'selected' : ''}>${esc(u.name)} (${esc(u.code)})</option>`).join('')}</select>`
+    : `<input data-vs="user" data-i="${i}" value="${esc(v.user || '')}" placeholder="User code, e.g. AHM" autocapitalize="characters">`;
+  return `${header('Van stock', 'more')}<main class="form"><div class="card">
+    <p class="small muted">Each salesperson's van is its own store. The office issues stock to a van in the morning (office stock goes down), the salesperson's invoices take stock from their van, and what is left is returned to the office store at the end of the day. In Tally each store is a godown (switch on "Maintain multiple godowns" and create one godown per van); issues and returns post as Stock Journals.</p>
+    <label class="tg"><input type="checkbox" id="vs-on" ${vc.enabled ? 'checked' : ''}> Use van stock</label>
+    <label>Office store godown in Tally</label><input id="vs-office" value="${esc(vc.officeGodown)}" placeholder="Main Location">
+    <div class="sec" style="margin-top:14px">Vans</div>
+    ${vc.vans.map((v, i) => `<div class="line"><div class="lh"><b>Van ${i + 1}</b><button class="x" data-act="vandel" data-i="${i}" aria-label="Remove van">✕</button></div>
+      <label>Name</label><input data-vs="name" data-i="${i}" value="${esc(v.name)}" placeholder="e.g. Van 1 (A 12345)">
+      <label>Godown name in Tally</label><input data-vs="godown" data-i="${i}" value="${esc(v.godown)}" placeholder="Exactly as in Tally">
+      <label>Salesperson</label>${userSel(v, i)}</div>`).join('') || '<p class="muted small">No vans yet.</p>'}
+    <button class="btn ghost full" data-act="vanadd">+ Add van</button>
+    <p class="small muted">To give a van to someone else (for example when a salesperson is on leave), change its salesperson. The stock stays with the van.</p>
+  </div><div id="formerr" class="err"></div><button class="btn full" data-act="savevans">Save for all users</button></main>`;
+};
+
 VIEWS.taxsettings = async () => {
   const tax = S.settings.tax;
   return `${header(tax.taxLabel + ' settings', 'more')}<main class="form"><div class="card">
@@ -703,6 +936,17 @@ document.addEventListener('click', async (e) => {
       }
       render(true);
     });
+    else if (act === 'additem' && isTransfer(S.draft.type)) openPicker('item', (code) => {
+      const ex = S.draft.lines.find((l) => l.itemCode === code);
+      if (!ex) S.draft.lines.push({ itemCode: code, qty: S.draft.type === 'vr' ? (availableFor(S.draft, S.vs)[code] || 1) : 1 });
+      render(true).then(() => { const i = S.draft.lines.findIndex((l) => l.itemCode === code); const el = document.querySelectorAll('[data-l="qty"]')[i]; el?.focus(); el?.select(); });
+    });
+    else if (act === 'returnall') {
+      const avail = Object.entries(availableFor(S.draft, S.vs)).filter(([, q]) => q > 0);
+      if (!avail.length) return toast(`${vanName(S.draft.van)} has nothing to return.`);
+      S.draft.lines = avail.map(([itemCode, qty]) => ({ itemCode, qty }));
+      render(true);
+    }
     else if (act === 'additem') openPicker('item', (code) => {
       const it = S.itemByCode.get(code);
       const taxCode = S.settings.tax.rates.some((r) => r.code === it.taxCode) ? it.taxCode : S.settings.tax.defaultRateCode;
@@ -772,6 +1016,15 @@ document.addEventListener('click', async (e) => {
     else if (act === 'userrole') { await S.api.updateUser({ id: a.dataset.id, role: a.dataset.role }); toast('Role changed'); render(true); }
     else if (act === 'copykey') { await navigator.clipboard.writeText(a.dataset.k).then(() => toast('Key copied'), () => toast('Select the key and copy it')); }
     else if (act === 'savetax') await saveTax();
+    else if (act === 'vanadd') { Object.assign(S.vanEdit, { enabled: $('#vs-on').checked, officeGodown: $('#vs-office').value }); const n = S.vanEdit.vans.length + 1; let id = 'V' + n; while (S.vanEdit.vans.some((v) => v.id === id)) id = 'V' + (Number(id.slice(1)) + 1); S.vanEdit.vans.push({ id, name: 'Van ' + n, godown: 'Van ' + n, user: '' }); render(true); }
+    else if (act === 'vandel') {
+      const v = S.vanEdit.vans[Number(a.dataset.i)];
+      const vs = await vanStockNow();
+      if (Object.values(vs.vans[v.id]?.items || {}).some((q) => Number(q))) return toast(`${v.name} still has stock. Return it to the office store first.`);
+      Object.assign(S.vanEdit, { enabled: $('#vs-on').checked, officeGodown: $('#vs-office').value });
+      S.vanEdit.vans.splice(Number(a.dataset.i), 1); render(true);
+    }
+    else if (act === 'savevans') await saveVans();
     else if (act === 'savecompany') await saveCompany();
     else if (act === 'saveledgers') await saveLedgers();
     else if (act === 'dellogo') { S.pendingLogo = ''; a.closest('.logo-row').querySelector('.logo-prev')?.remove(); a.remove(); }
@@ -789,15 +1042,18 @@ document.addEventListener('click', async (e) => {
 document.addEventListener('change', async (e) => {
   const el = e.target;
   if (el.matches('[data-act="flag"]')) { await S.api.setFlag(el.dataset.k, el.checked); toast(el.dataset.k === 'internet' ? (el.checked ? 'Internet on (simulated)' : 'Internet off (simulated)') : (el.checked ? 'Tally PC on (simulated)' : 'Tally PC off (simulated)')); S.sync.syncNow(); }
+  if (el.dataset.vs && S.vanEdit) { S.vanEdit.vans[el.dataset.i][el.dataset.vs] = el.value; return; }
   if (el.matches('[data-l="taxCode"]')) { S.draft.lines[el.dataset.i].taxCode = el.value; updateTotals(); }
-  if (el.matches('select[data-f]')) S.draft[el.dataset.f] = el.value;
+  if (el.matches('select[data-f]')) { S.draft[el.dataset.f] = el.value; if (el.dataset.f === 'van') render(true); }
 });
 
 document.addEventListener('input', (e) => {
   const el = e.target;
-  if (el.id === 'archq') { S.archQ = el.value; clearTimeout(S._aq); S._aq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#archq'); n.focus(); n.setSelectionRange(pos, pos); }, 300); return; }
-  if (el.id === 'listq') { S.listQ = el.value; clearTimeout(S._lq); S._lq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#listq'); n.focus(); n.setSelectionRange(pos, pos); }, 150); return; }
-  if (el.id === 'partyq') { S.partyQ = el.value; clearTimeout(S._pq); S._pq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#partyq'); n.focus(); n.setSelectionRange(pos, pos); }, 120); return; }
+  if (el.id === 'archq') { S.archQ = el.value; clearTimeout(S._aq); S._aq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#archq'); n?.focus(); n?.setSelectionRange(pos, pos); }, 300); return; }
+  if (el.dataset.vs && S.vanEdit) { S.vanEdit.vans[el.dataset.i][el.dataset.vs] = el.value; return; }
+  if (el.id === 'vanq') { S.vanQ = el.value; clearTimeout(S._vq); S._vq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#vanq'); n?.focus(); n?.setSelectionRange(pos, pos); }, 150); return; }
+  if (el.id === 'listq') { S.listQ = el.value; clearTimeout(S._lq); S._lq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#listq'); n?.focus(); n?.setSelectionRange(pos, pos); }, 150); return; }
+  if (el.id === 'partyq') { S.partyQ = el.value; clearTimeout(S._pq); S._pq = setTimeout(async () => { const pos = el.selectionStart; await render(true); const n = $('#partyq'); n?.focus(); n?.setSelectionRange(pos, pos); }, 120); return; }
   if (!S.draft) return;
   if (el.dataset.f) S.draft[el.dataset.f] = el.value;
   if (el.dataset.l) { S.draft.lines[el.dataset.i][el.dataset.l] = el.value; updateTotals(); }
@@ -903,6 +1159,25 @@ async function saveLedgers() {
     s.ledgerMap[el.dataset.lm] = v;
   }
   await saveSettings(s, 'Saved. The office connector uses the new names from its next run.');
+}
+
+async function saveVans() {
+  const e = S.vanEdit, err = (m) => { $('#formerr').textContent = m; };
+  e.enabled = $('#vs-on').checked;
+  e.officeGodown = $('#vs-office').value.trim();
+  if (e.enabled && !e.officeGodown) return err('Enter the office store godown name.');
+  for (const v of e.vans) {
+    v.name = v.name.trim(); v.godown = v.godown.trim(); v.user = (v.user || '').trim().toUpperCase();
+    if (!v.name || !v.godown) return err('Every van needs a name and a Tally godown.');
+    if (v.godown === e.officeGodown) return err(`${v.name} cannot use the office store godown.`);
+  }
+  const dup = (k) => e.vans.find((v, i) => v[k] && e.vans.findIndex((x) => x[k] === v[k]) !== i);
+  if (dup('godown')) return err(`Two vans use the godown ${dup('godown').godown}.`);
+  if (dup('user')) return err(`${dup('user').user} is assigned to two vans. A salesperson sells from one van.`);
+  const s = structuredClone(S.settings);
+  s.vanStock = { enabled: e.enabled, officeGodown: e.officeGodown, vans: e.vans };
+  S.vanEdit = null;
+  await saveSettings(s, 'Saved. Phones get the van setup at their next sync.');
 }
 
 async function saveTax() {

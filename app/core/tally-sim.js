@@ -47,7 +47,8 @@ export class TallySim {
   }
 
   static seed() {
-    const s = { company: 'Al Noor Trading LLC (Demo)', alterSeq: 0, masterSeq: 0, ledgers: {}, items: {}, vouchers: [], vchNo: {}, open: true };
+    const s = { company: 'Al Noor Trading LLC (Demo)', alterSeq: 0, masterSeq: 0, ledgers: {}, items: {}, vouchers: [], vchNo: {}, open: true,
+      godowns: ['Main Location', 'Van 1', 'Van 2', 'Van 3'] };
     const sim = new TallySim(s);
     const L = (name, parent, extra = {}) => sim.addLedger({ name, parent, ...extra });
     L('Cash', 'Cash-in-Hand'); L('Emirates NBD Current A/c', 'Bank Accounts'); L('ADCB Current A/c', 'Bank Accounts');
@@ -134,6 +135,16 @@ export class TallySim {
     const l = this.s.ledgers[name];
     const { bills, extraCredit } = this._bills(l);
     return Math.round((bills.reduce((t, b) => t + b.amount, 0) - extraCredit) * 100) / 100; // debit positive
+  }
+  /** Stock of an item in one godown. Opening stock sits in Main Location. */
+  godownStock(name, godown) {
+    const it = this.s.items[name];
+    let q = godown === 'Main Location' ? it.stock : 0;
+    for (const v of this.s.vouchers) if (!v.cancelled && ['Sales', 'Purchase', 'Stock Journal'].includes(v.vchType)) for (const ln of v.lines || []) if (ln.item === name && (ln.godown || 'Main Location') === godown) {
+      const n = parseFloat(String(ln.qty)) || 0;
+      q += ln.inward ? n : -n;
+    }
+    return Math.round(q * 1000) / 1000;
   }
   stockOf(name) {
     const it = this.s.items[name];
@@ -255,11 +266,22 @@ export class TallySim {
     const party = childText(n, 'PARTYLEDGERNAME');
     const ledgerNames = deepAll(n, 'LEDGERNAME').map(text);
     for (const ln of [party, ...ledgerNames]) if (ln && !this.s.ledgers[ln]) throw new Error(`Ledger '${ln}' does not exist!`);
-    const lines = findAll(n, 'ALLINVENTORYENTRIES.LIST').map((e) => {
+    const godownOf = (e) => {
+      const b = find(e, 'BATCHALLOCATIONS.LIST');
+      const g = b ? childText(b, 'GODOWNNAME') : '';
+      if (g && !(this.s.godowns || ['Main Location']).includes(g)) throw new Error(`Godown '${g}' does not exist!`);
+      return g || 'Main Location';
+    };
+    const invLine = (e, inward) => {
       const item = childText(e, 'STOCKITEMNAME');
       if (!this.s.items[item]) throw new Error(`Stock Item '${item}' does not exist!`);
-      return { item, qty: childText(e, 'BILLEDQTY'), rate: childText(e, 'RATE'), amount: Number(childText(e, 'AMOUNT')) };
-    });
+      return { item, qty: childText(e, 'BILLEDQTY'), rate: childText(e, 'RATE'), amount: Number(childText(e, 'AMOUNT')), godown: godownOf(e), inward };
+    };
+    const lines = findAll(n, 'ALLINVENTORYENTRIES.LIST').map((e) => invLine(e, vchType === 'Purchase'));
+    if (vchType === 'Stock Journal') {
+      lines.push(...findAll(n, 'INVENTORYENTRIESOUT.LIST').map((e) => invLine(e, false)), ...findAll(n, 'INVENTORYENTRIESIN.LIST').map((e) => invLine(e, true)));
+      if (!lines.length) throw new Error('No stock items in the Stock Journal');
+    }
     // Balance check, as Tally refuses unbalanced vouchers.
     let sum = 0;
     for (const le of findAll(n, 'LEDGERENTRIES.LIST')) sum += Number(childText(le, 'AMOUNT')) || 0;

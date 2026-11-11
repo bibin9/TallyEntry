@@ -105,3 +105,6 @@ a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-conten
 .line .stk { margin-left: auto; margin-right: 8px; font-size: 12px; color: var(--mute); white-space: nowrap; }
 .line .stk.low { color: var(--red); font-weight: 600; }
 .row .od { color: var(--red); }
+/* Van stock */
+.t-vi{background:#e0f4f4;color:#0b7a7a}.t-vr{background:#fde8e4;color:#b4432d}.t-vs{background:#eceff3;color:#3a4256}
+.doc-sig{display:flex;justify-content:space-between;margin-top:40px;font-size:12px;color:#444}.doc-sig span{border-top:1px solid #888;padding-top:4px;min-width:180px;text-align:center}

@@ -4,6 +4,7 @@
 
 import * as TX from './tally-xml.js';
 import { DEFAULT_TAX } from './vat.js';
+import { TYPES, vanConfig } from './types.js';
 
 export const CONNECTOR_VERSION = '0.2.2';
 
@@ -186,6 +187,16 @@ export class Connector {
     return { ...r, ok: true, action: 'Cancel', masterId: target.masterId };
   }
 
+  /** Tally godowns for an entry when van stock is on: { office, van, vanName }, else null. */
+  _stores(txn) {
+    const c = vanConfig(this.settings);
+    const transfer = TYPES[txn.type]?.kind === 'transfer';
+    if (!c.enabled && !transfer) return null;
+    const van = txn.van ? c.vans.find((v) => v.id === txn.van) : null;
+    if (txn.van && !van?.godown) throw new Error(`Van ${txn.van} has no Tally godown set. Set it in More > Van stock.`);
+    return { office: c.officeGodown, van: van?.godown || null, vanName: van?.name || null };
+  }
+
   async postPending() {
     const queue = await this.relay.queue();
     const results = [];
@@ -195,7 +206,9 @@ export class Connector {
       const r = { id: txn.id, version: txn.version };
       try {
         if (txn.cancelled) { results.push(await this._cancel(txn, mapping, r)); continue; }
-        if (!names.party) throw new Error(`Party code ${txn.partyCode} not found in synced masters`);
+        const transfer = TYPES[txn.type]?.kind === 'transfer';
+        if (!transfer && !names.party) throw new Error(`Party code ${txn.partyCode} not found in synced masters`);
+        const stores = this._stores(txn);
         let target = null;
         if (mapping?.masterId) {
           target = await this._findVoucher('mid', mapping.masterId);
@@ -213,7 +226,7 @@ export class Connector {
           if (target) this.log('info', `${txn.number}: already in Tally (voucher ${target.masterId}); altering instead of creating`);
         }
         const action = target ? 'Alter' : 'Create';
-        const xml = TX.voucherRequest(this.company, txn, names, map, tax, action, target?.masterId);
+        const xml = TX.voucherRequest(this.company, txn, names, map, tax, action, target?.masterId, stores);
         const res = TX.parseImportResponse(await this._tally(xml));
         if (res.errors || (!res.created && !res.altered)) {
           const msg = res.messages.join('; ') || 'Tally did not accept the voucher';

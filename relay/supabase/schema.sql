@@ -142,6 +142,22 @@ create table if not exists sync_mappings (
   foreign key (tenant_id, txn_id) references txns(tenant_id, id) on delete cascade
 );
 
+-- Van stock: how each app entry moves stock into (+) or out of (-) a salesperson's van.
+-- Issues add, returns and van sales take away; a cancelled entry has no rows. Not tied to txns by a
+-- foreign key, so van balances stay right after old entries are cleaned off the server.
+create table if not exists van_moves (
+  tenant_id  text not null references tenants(id) on delete cascade,
+  txn_id     text not null,
+  line_no    int not null,
+  van        text not null,
+  item_code  text not null,
+  qty        numeric(14,3) not null,
+  txn_type   text not null,
+  txn_date   date,
+  primary key (tenant_id, txn_id, line_no)
+);
+create index if not exists van_moves_van on van_moves (tenant_id, van, item_code);
+
 create table if not exists sync_log (
   id        bigserial primary key,
   tenant_id text not null references tenants(id) on delete cascade,
@@ -166,6 +182,7 @@ alter table sync_mappings enable row level security;
 alter table sync_log      enable row level security;
 alter table user_sessions enable row level security;
 alter table purged_txns   enable row level security;
+alter table van_moves     enable row level security;
 
 -- ---------------------------------------------------------------------------------------
 -- Helpers
@@ -484,6 +501,14 @@ begin
       insert into txn_lines (tenant_id, txn_id, line_no, item_code, qty, rate, disc_pct, tax_code)
       select v_tid, x->>'id', o.n, o.l->>'itemCode', (o.l->>'qty')::numeric, (o.l->>'rate')::numeric, coalesce((o.l->>'discPct')::numeric, 0), o.l->>'taxCode'
       from jsonb_array_elements(coalesce(x->'lines', '[]'::jsonb)) with ordinality as o(l, n);
+      delete from van_moves where tenant_id = v_tid and txn_id = x->>'id';
+      if coalesce(x->>'van', '') <> '' and coalesce((x->>'cancelled')::boolean, false) = false and x->>'type' in ('vi', 'vr', 'si') then
+        insert into van_moves (tenant_id, txn_id, line_no, van, item_code, qty, txn_type, txn_date)
+        select v_tid, x->>'id', o.n, x->>'van', o.l->>'itemCode',
+          case when x->>'type' = 'vi' then 1 else -1 end * (o.l->>'qty')::numeric, x->>'type', (x->>'date')::date
+        from jsonb_array_elements(coalesce(x->'lines', '[]'::jsonb)) with ordinality as o(l, n)
+        where coalesce(o.l->>'itemCode', '') <> '' and coalesce((o.l->>'qty')::numeric, 0) <> 0;
+      end if;
       perform qe_log(v_tid, 'device->cloud', x->>'id', x->>'number', (x->>'version')::int, case when cur.id is null then 'received' else 'updated' end);
       res := res || jsonb_build_object('id', x->>'id', 'accepted', true, 'version', (x->>'version')::int);
     end loop;
@@ -555,6 +580,18 @@ begin
       where tx.tenant_id = v_tid and tx.archived_at is not null
         and (coalesce(p_body->>'q', '') = '' or tx.number ilike '%' || (p_body->>'q') || '%' or l.name ilike '%' || (p_body->>'q') || '%' or tx.party_code ilike '%' || (p_body->>'q') || '%')
       order by tx.archived_at desc, tx.number desc limit 200) a), '[]'::jsonb);
+
+  elsif p_op = 'stock.vans' then
+    -- Stock in each van, and per item the van sales not yet in Tally (same shape as getVanStock in relay-core.js).
+    return jsonb_build_object(
+      'vans', coalesce((select jsonb_object_agg(v.van, jsonb_build_object('items', coalesce(v.items, '{}'::jsonb), 'lastIssue', v.last_issue, 'lastReturn', v.last_return)) from (
+          select mv.van,
+            (select jsonb_object_agg(b.item_code, b.q) from (select item_code, sum(qty) q from van_moves where tenant_id = v_tid and van = mv.van group by item_code having sum(qty) <> 0) b) items,
+            max(mv.txn_date) filter (where mv.txn_type = 'vi') last_issue, max(mv.txn_date) filter (where mv.txn_type = 'vr') last_return
+          from van_moves mv where mv.tenant_id = v_tid group by mv.van) v), '{}'::jsonb),
+      'pending', coalesce((select jsonb_object_agg(p.item_code, p.q) from (
+          select mv.item_code, -sum(mv.qty) q from van_moves mv join txns tx on tx.tenant_id = mv.tenant_id and tx.id = mv.txn_id
+          where mv.tenant_id = v_tid and mv.txn_type = 'si' and tx.status <> 'synced' group by mv.item_code) p), '{}'::jsonb));
 
   elsif p_op = 'connectorinfo' then
     return jsonb_build_object('state', t.connector_state, 'lastSeen', t.connector_last_seen, 'version', t.connector_version, 'tallyOk', t.connector_tally_ok);
@@ -630,7 +667,7 @@ begin
         and (status = 'queued' or (status = 'failed' and retry_at <= now() and attempts < 6))
         order by received_at limit 50 loop
       select * into m from sync_mappings where tenant_id = v_tid and txn_id = cur.id;
-      select coalesce(jsonb_object_agg(i.code, jsonb_build_object('name', i.name, 'unit', i.data->>'unit')), '{}'::jsonb) into v_items
+      select coalesce(jsonb_object_agg(i.code, jsonb_build_object('name', i.name, 'unit', i.data->>'unit', 'cost', coalesce((i.data->>'cost')::numeric, 0))), '{}'::jsonb) into v_items
         from items i where i.tenant_id = v_tid and i.code in (select l->>'itemCode' from jsonb_array_elements(coalesce(cur.data->'lines','[]'::jsonb)) l);
       v_names := jsonb_build_object(
         'party', (select name from ledgers where tenant_id = v_tid and code = cur.party_code),

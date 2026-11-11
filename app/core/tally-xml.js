@@ -170,10 +170,13 @@ const qtyStr = (q, unit) => ` ${Number(q)} ${unit || ''}`.trimEnd();
  * names: { party, items: {code: {name, unit}}, ledgers: {code: name} } current Tally names, resolved by code.
  * map:   ledger mapping from settings (salesLedger, purchaseLedger, outputTaxLedger, inputTaxLedger, roundOffLedger)
  * action: 'Create' | 'Alter'; masterId required for Alter.
+ * stores: null when van stock is off; else { office, van } Tally godown names. Sales and purchases
+ *         then name the godown the goods leave or enter; van issues and returns are Stock Journals.
  */
-export function voucherRequest(company, txn, names, map, tax, action = 'Create', masterId = null) {
+export function voucherRequest(company, txn, names, map, tax, action = 'Create', masterId = null, stores = null) {
   const t = TYPES[txn.type];
   if (!t) throw new Error('Unknown transaction type ' + txn.type);
+  if (t.kind === 'transfer') return stockJournalRequest(company, txn, names, stores, action, masterId);
   const head = action === 'Alter'
     // VERIFY: altering by MASTERID via TAGNAME/TAGVALUE on the client's Tally release.
     ? `<VOUCHER TAGNAME="MASTERID" TAGVALUE="${Number(masterId)}" VCHTYPE="${esc(t.vchType)}" ACTION="Alter" REMOTEID="${esc(txn.id)}"${t.kind === 'items' ? ' OBJVIEW="Invoice Voucher View"' : ''}>`
@@ -202,6 +205,8 @@ export function voucherRequest(company, txn, names, map, tax, action = 'Create',
       body += `<ALLINVENTORYENTRIES.LIST><STOCKITEMNAME>${esc(it.name)}</STOCKITEMNAME><ISDEEMEDPOSITIVE>${sales ? 'No' : 'Yes'}</ISDEEMEDPOSITIVE>`
         + `<RATE>${amt(l.rate)}/${esc(it.unit)}</RATE>${l.discPct ? `<DISCOUNT>${Number(l.discPct)}</DISCOUNT>` : ''}<AMOUNT>${amt(lineSign * l.taxable)}</AMOUNT>`
         + `<ACTUALQTY>${esc(qtyStr(l.qty, it.unit))}</ACTUALQTY><BILLEDQTY>${esc(qtyStr(l.qty, it.unit))}</BILLEDQTY>`
+        // VERIFY: godown allocation on a live TallyPrime ("Maintain multiple godowns" on, no batches).
+        + (stores && txn.type !== 'so' ? batch(txn.type === 'si' && txn.van ? stores.van : stores.office, l.qty, it.unit, lineSign * l.taxable) : '')
         + `<ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>${esc(accLedger)}</LEDGERNAME><ISDEEMEDPOSITIVE>${sales ? 'No' : 'Yes'}</ISDEEMEDPOSITIVE><AMOUNT>${amt(lineSign * l.taxable)}</AMOUNT></ACCOUNTINGALLOCATIONS.LIST>`
         + `</ALLINVENTORYENTRIES.LIST>`;
     }
@@ -217,6 +222,42 @@ export function voucherRequest(company, txn, names, map, tax, action = 'Create',
       + (txn.reference ? `<BANKALLOCATIONS.LIST><INSTRUMENTNUMBER>${esc(txn.reference)}</INSTRUMENTNUMBER><TRANSACTIONTYPE>${esc(txn.mode || '')}</TRANSACTIONTYPE><AMOUNT>${amt(-a)}</AMOUNT></BANKALLOCATIONS.LIST>` : '')
       + `</LEDGERENTRIES.LIST>`;
   }
+  return importEnv(company, 'Vouchers', head + body + '</VOUCHER>');
+}
+
+const batch = (godown, qty, unit, amount) => {
+  if (!godown) throw new Error('No Tally godown is set for this entry. Set it in More > Van stock.');
+  return `<BATCHALLOCATIONS.LIST><GODOWNNAME>${esc(godown)}</GODOWNNAME><BATCHNAME>Primary Batch</BATCHNAME>`
+    + `${amount == null ? '' : `<AMOUNT>${amt(amount)}</AMOUNT>`}<ACTUALQTY>${esc(qtyStr(qty, unit))}</ACTUALQTY><BILLEDQTY>${esc(qtyStr(qty, unit))}</BILLEDQTY></BATCHALLOCATIONS.LIST>`;
+};
+
+/**
+ * Van issue / return as a Stock Journal moving goods between two godowns. Total stock does not change.
+ * Issue: office -> van. Return: van -> office. Valued at the item's standard cost when Tally has one.
+ * VERIFY: Stock Journal layout (INVENTORYENTRIESOUT = source, INVENTORYENTRIESIN = destination) on a live TallyPrime.
+ */
+export function stockJournalRequest(company, txn, names, stores, action = 'Create', masterId = null) {
+  const t = TYPES[txn.type];
+  if (!stores?.van || !stores?.office) throw new Error('No Tally godown is set for this van or the office store. Set them in More > Van stock.');
+  const [from, to] = t.dir === 'out' ? [stores.office, stores.van] : [stores.van, stores.office];
+  const head = action === 'Alter'
+    ? `<VOUCHER TAGNAME="MASTERID" TAGVALUE="${Number(masterId)}" VCHTYPE="${esc(t.vchType)}" ACTION="Alter" REMOTEID="${esc(txn.id)}">`
+    : `<VOUCHER VCHTYPE="${esc(t.vchType)}" ACTION="Create" REMOTEID="${esc(txn.id)}">`;
+  let body = `<DATE>${tdate(txn.date)}</DATE><VOUCHERTYPENAME>${esc(t.vchType)}</VOUCHERTYPENAME><VOUCHERNUMBER>${esc(txn.number)}</VOUCHERNUMBER>`
+    + `<NARRATION>${esc(txn.narration || `${t.name}: ${stores.vanName || stores.van}`)}</NARRATION>` + udf('QETXNID', txn.id);
+  const entry = (tag, l, godown, inward) => {
+    const it = names.items[l.itemCode];
+    if (!it) throw new Error(`Item ${l.itemCode} is not in the synced masters`);
+    const cost = Number(it.cost) || 0, value = cost ? roundTo(cost * Number(l.qty), 2) : null;
+    // Inward (destination) is a debit: ISDEEMEDPOSITIVE Yes with a negative amount.
+    const signed = value == null ? null : inward ? -value : value;
+    return `<${tag}><STOCKITEMNAME>${esc(it.name)}</STOCKITEMNAME><ISDEEMEDPOSITIVE>${inward ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE>`
+      + (cost ? `<RATE>${amt(cost)}/${esc(it.unit)}</RATE><AMOUNT>${amt(signed)}</AMOUNT>` : '')
+      + `<ACTUALQTY>${esc(qtyStr(l.qty, it.unit))}</ACTUALQTY><BILLEDQTY>${esc(qtyStr(l.qty, it.unit))}</BILLEDQTY>`
+      + batch(godown, l.qty, it.unit, signed) + `</${tag}>`;
+  };
+  for (const l of txn.lines || []) body += entry('INVENTORYENTRIESOUT.LIST', l, from, false);
+  for (const l of txn.lines || []) body += entry('INVENTORYENTRIESIN.LIST', l, to, true);
   return importEnv(company, 'Vouchers', head + body + '</VOUCHER>');
 }
 

@@ -31,6 +31,7 @@ export class HttpApi {
   retry(ids) { return this._call('POST', '/api/txns/retry', { ids }); }
   resolve(id, choice) { return this._call('POST', '/api/txns/resolve', { id, choice }); }
   log() { return this._call('GET', '/api/log'); }
+  vanStock() { return this._call('GET', '/api/van-stock'); }
   connectorStatus() { return this._call('GET', '/api/connector-status'); }
   users() { return this._call('GET', '/api/users'); }
   addUser(u) { return this._call('POST', '/api/users', u); }

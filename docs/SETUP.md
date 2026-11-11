@@ -129,6 +129,22 @@ Command-line alternative: `node relay/supabase/new-tenant.mjs --id al-noor --nam
 3. The app opens on the sign-in screen: enter the Company ID, user code and password from the office admin, tap **Sign in**.
 4. Wait for the first sync (customers and items download), then the app works offline.
 
+## 5a. Van stock (optional: salespeople selling from their own van)
+
+Use this when each salesperson takes stock out in a van and sells from it.
+
+1. **In TallyPrime:** F11 Features > Inventory > switch on **Maintain multiple godowns**. Create one godown for the office store (Tally's default is **Main Location**) and one godown per van, for example **Van 1**, **Van 2**. Tally must also have the **Stock Journal** voucher type (it does by default).
+2. **In the app (office admin):** More > **Van stock**. Tick **Use van stock**, check the office godown name, add each van with its Tally godown name, and pick the salesperson for each van. Save. Phones pick it up at their next sync.
+3. **Daily routine:**
+   * Morning: Home > **Issue to Van**. Office stock goes down at once; the van's stock goes up. Posts a Stock Journal (office godown to van godown).
+   * During the day: the salesperson's invoices take stock from their van (the invoice is posted from the van godown). The app does not let them sell more than the van holds.
+   * Evening: Home > **Return from Van** > **Return everything in the van**, change any quantity that is short, save. Posts a Stock Journal back to the office godown. A van not returned by the next day is flagged on the home screen and on **Van stock**.
+4. **Van stock** (Home) shows what is in every van and the office store. Office store = Tally's total stock − stock in vans − van sales not in Tally yet.
+
+To give a van to someone else (leave, new joiner), change its salesperson in More > Van stock; the stock stays with the van.
+
+Database: run the updated `relay/supabase/schema.sql` once (it adds the `van_moves` table and the `stock.vans` operation; re-running is safe).
+
 ## 6. First live test on a real TallyPrime (do this before go-live)
 
 Use a copy of the client's company. Each line checks one point marked `VERIFY` in the code.

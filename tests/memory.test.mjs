@@ -12,6 +12,7 @@ scenarios(test, async () => {
       masters: (s) => core.getMasters(T, s), push: (x) => core.pushTransactions(T, 'u1', structuredClone(x)),
       statuses: (ids) => core.getStatuses(T, ids), retry: (ids) => core.retry(T, ids),
       resolve: (id, c) => core.resolveConflict(T, id, c), log: () => core.getLog(T),
+      vanStock: () => core.getVanStock(T), saveSettings: (st) => core.putSettings(T, st),
     },
     cleanup: () => {},
   };
