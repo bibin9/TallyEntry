@@ -51,6 +51,7 @@ export async function handleApi(core, auth, { method, path, query = {}, body = {
       if (user.role !== 'admin') return err(403, 'Only an office admin can resolve conflicts');
       return ok(await core.resolveConflict(tid, body.id, body.choice));
     case 'GET /api/log': return ok(await core.getLog(tid));
+    case 'GET /api/van-stock': return ok(await core.getVanStock(tid));
     case 'GET /api/connector-status': return ok(await core.connectorStatus(tid));
     case 'GET /api/users': case 'POST /api/users': case 'POST /api/users/update': case 'POST /api/users/resetkey': case 'POST /api/users/password': {
       if (user.role !== 'admin') return err(403, 'Only an office admin can manage users');

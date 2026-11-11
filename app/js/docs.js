@@ -13,9 +13,16 @@ export function docModel(txn, ctx) {
   const t = TYPES[txn.type];
   const st = ctx.settings;
   const tax = st.tax;
-  const party = ctx.ledgerByCode.get(txn.partyCode) || { name: txn.partyName || txn.partyCode };
+  const van = (st.vanStock?.vans || []).find((v) => v.id === txn.van);
+  const party = t.kind === 'transfer' ? { name: van?.name || txn.van || '' }
+    : ctx.ledgerByCode.get(txn.partyCode) || { name: txn.partyName || txn.partyCode };
   const model = { t, txn, co: st.company, tax, party, cur: tax.currency, d: tax.decimals ?? 2 };
-  if (t.kind === 'items') {
+  if (t.kind === 'transfer') {
+    const office = st.vanStock?.officeGodown || 'Office store';
+    [model.from, model.to] = t.dir === 'out' ? [office, party.name] : [party.name, office];
+    model.lines = (txn.lines || []).map((l, i) => { const it = ctx.itemByCode.get(l.itemCode) || { name: l.itemCode, unit: '' }; return { n: i + 1, name: it.name, unit: it.unit, code: l.itemCode, qty: l.qty }; });
+    model.total = model.lines.reduce((a, l) => a + (Number(l.qty) || 0), 0);
+  } else if (t.kind === 'items') {
     const c = calcDoc(txn.lines, tax);
     model.calc = c;
     model.lines = c.lines.map((l, i) => {
@@ -35,6 +42,16 @@ export function docHtml(m) {
   const head = `<div class="doc-head"><div>${co.logo ? `<img class="doc-logo" src="${esc(co.logo)}" alt="">` : ''}<div class="doc-co">${esc(co.name)}</div><div class="doc-sub">${esc(co.address)}</div>
     ${co.trn ? `<div class="doc-sub">${esc(tax.taxIdLabel)}: ${esc(co.trn)}</div>` : ''}${co.phone ? `<div class="doc-sub">${esc(co.phone)}</div>` : ''}</div>
     <div class="doc-title">${esc(t.docTitle)}</div></div>`;
+  if (t.kind === 'transfer') {
+    const rows = m.lines.map((l) => `<tr><td>${l.n}</td><td>${esc(l.name)}<div class="doc-sub">${esc(l.code)}</div></td><td class="r">${esc(l.qty)} ${esc(l.unit)}</td></tr>`).join('');
+    return `<div class="doc">${head}<div class="doc-meta"><div><div class="doc-lab">From</div><b>${esc(m.from)}</b><div class="doc-lab" style="margin-top:6px">To</div><b>${esc(m.to)}</b></div>
+      <div class="doc-right"><div><span class="doc-lab">No.</span> <b>${esc(txn.number)}</b></div><div><span class="doc-lab">Date</span> ${fdate(txn.date)}</div>
+      ${txn.tally?.voucherNo ? `<div class="doc-sub">Tally voucher ${esc(txn.tally.voucherNo)}</div>` : ''}</div></div>
+      <table class="doc-tbl"><thead><tr><th>#</th><th>Item</th><th class="r">Qty</th></tr></thead><tbody>${rows}</tbody></table>
+      <table class="doc-tot"><tr class="grand"><td>Total quantity</td><td class="r">${esc(m.total)}</td></tr></table>
+      ${txn.narration ? `<div class="doc-note">${esc(txn.narration)}</div>` : ''}<div class="doc-sig"><span>Issued by</span><span>Received by</span></div>
+      <div class="doc-foot">Stock transfer between stores. Not an invoice.${txn.status !== 'synced' ? ' Not yet posted to Tally.' : ''}</div></div>`;
+  }
   const meta = `<div class="doc-meta"><div><div class="doc-lab">${t.party === 'supplier' ? 'Supplier' : 'Customer'}</div><b>${esc(party.name)}</b>
       ${party.address ? `<div>${esc(party.address)}</div>` : ''}${party.trn ? `<div>${esc(tax.taxIdLabel)}: ${esc(party.trn)}</div>` : ''}${party.phone ? `<div>${esc(party.phone)}</div>` : ''}</div>
     <div class="doc-right"><div><span class="doc-lab">No.</span> <b>${esc(txn.number)}</b></div><div><span class="doc-lab">Date</span> ${fdate(txn.date)}</div>
@@ -78,6 +95,30 @@ export function docPdf(m) {
   for (const s of [co.address, co.trn && `${tax.taxIdLabel}: ${co.trn}`, co.phone].filter(Boolean)) { y += 4.5; pdf.text(String(s), L, y); }
   y += 4; pdf.setDrawColor(200); pdf.line(L, y, R, y); y += 7;
   const y0 = y;
+  if (t.kind === 'transfer') {
+    for (const [k, v] of [['FROM', m.from], ['TO', m.to]]) {
+      pdf.setFontSize(8); pdf.setTextColor(110); pdf.text(k, L, y); pdf.setTextColor(0);
+      pdf.setFontSize(10); pdf.setFont('helvetica', 'bold'); pdf.text(String(v || ''), L + 14, y); pdf.setFont('helvetica', 'normal'); y += 6;
+    }
+    pdf.setFontSize(9);
+    let yr2 = y0;
+    for (const [k, v] of [['No.', txn.number], ['Date', fdate(txn.date)]]) { pdf.setTextColor(110); pdf.text(k, R - 55, yr2); pdf.setTextColor(0); pdf.text(String(v), R, yr2, { align: 'right' }); yr2 += 5; }
+    y = Math.max(y, yr2) + 6;
+    pdf.setFillColor(238, 242, 248); pdf.rect(L - 2, y - 4.5, R - L + 4, 7, 'F');
+    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(8.5); pdf.text('#', L, y); pdf.text('Item', L + 7, y); pdf.text('Qty', R, y, { align: 'right' });
+    pdf.setFont('helvetica', 'normal'); y += 7;
+    for (const l of m.lines) {
+      if (y > 265) { pdf.addPage(); y = 20; }
+      const name = pdf.splitTextToSize(`${l.name} (${l.code})`, 140);
+      pdf.text(String(l.n), L, y); pdf.text(name, L + 7, y); pdf.text(`${l.qty} ${l.unit}`, R, y, { align: 'right' });
+      y += 4.5 * name.length + 2; pdf.setDrawColor(230); pdf.line(L, y - 3, R, y - 3);
+    }
+    pdf.setFont('helvetica', 'bold'); pdf.text('Total quantity', 140, y + 3, { align: 'right' }); pdf.text(String(m.total), R, y + 3, { align: 'right' }); pdf.setFont('helvetica', 'normal');
+    y += 22; pdf.text('Issued by: ____________________', L, y); pdf.text('Received by: ____________________', R, y, { align: 'right' });
+    if (txn.narration) { y += 10; pdf.text(pdf.splitTextToSize(txn.narration, R - L), L, y); }
+    pdf.setFontSize(8); pdf.setTextColor(120); pdf.text('Stock transfer between stores. Not an invoice.', L, 287);
+    return pdf.output('blob');
+  }
   pdf.setFontSize(8); pdf.setTextColor(110); pdf.text(t.party === 'supplier' ? 'SUPPLIER' : 'CUSTOMER', L, y); pdf.setTextColor(0);
   pdf.setFontSize(10); pdf.setFont('helvetica', 'bold'); y += 5; pdf.text(party.name || '', L, y); pdf.setFont('helvetica', 'normal'); pdf.setFontSize(9);
   for (const s of [party.address, party.trn && `${tax.taxIdLabel}: ${party.trn}`, party.phone].filter(Boolean)) { y += 4.5; pdf.text(String(s), L, y); }
@@ -120,6 +161,7 @@ export function docPdf(m) {
 }
 
 export function shareText(m) {
+  if (m.t.kind === 'transfer') return `${m.t.docTitle} ${m.txn.number}\n${m.co.name}\nFrom: ${m.from}\nTo: ${m.to}\nDate: ${fdate(m.txn.date)}\nTotal quantity: ${m.total}`;
   return `${m.t.docTitle} ${m.txn.number}\n${m.co.name}\nTo: ${m.party.name}\nDate: ${fdate(m.txn.date)}\nTotal: ${money(m.total, m.cur, m.d)}`;
 }
 

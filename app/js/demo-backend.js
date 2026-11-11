@@ -34,6 +34,10 @@ export class DemoBackend {
       t.settings = defaultSettings(this.sim.company);
       Object.assign(t.settings.company, { address: 'Office 204, Al Qusais, Dubai, UAE', trn: '100123456700003', phone: '+971 4 000 0000', email: 'accounts@alnoor.example' });
     }
+    // Sample vans (off until switched on under More > Van stock). The simulated Tally has these godowns.
+    t.settings.vanStock ||= { enabled: false, officeGodown: 'Main Location', vans: [
+      { id: 'V1', name: 'Van 1', godown: 'Van 1', user: 'DEMO' }, { id: 'V2', name: 'Van 2', godown: 'Van 2', user: 'AHM' }] };
+    this.sim.s.godowns ||= ['Main Location', 'Van 1', 'Van 2', 'Van 3'];
     this.connector = new Connector({ tally: async (x) => { if (!this.flags.tallyOn) throw new Error('TallyPrime is closed'); return this.sim.handle(x); }, relay: directRelay(this.core, TID), company: this.sim.company });
     this.mode = 'demo';
     this.listeners = new Set();
@@ -71,6 +75,7 @@ export class DemoBackend {
   async retry(ids) { this._net(); const r = await this.core.retry(TID, ids); setTimeout(() => this.tick(), 300); return r; }
   async resolve(id, choice) { this._net(); const r = await this.core.resolveConflict(TID, id, choice); setTimeout(() => this.tick(), 300); return r; }
   async log() { return this.core.getLog(TID); }
+  async vanStock() { this._net(); return structuredClone(await this.core.getVanStock(TID)); }
   async connectorStatus() { return this.core.connectorStatus(TID); }
   async _users(op, body) { this._net(); const r = await usersOp(this.userKeys, TID, 'demo-user', op, body); if (op !== 'users.list') this._save(true); return r; }
   async setPassword(id, password) { return this._users('users.setpassword', { id, password }); }

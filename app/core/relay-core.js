@@ -3,6 +3,8 @@
 // The production Supabase/Postgres version implements the same operations in SQL
 // (see relay/supabase/schema.sql); this file is the reference behaviour.
 
+import { vanMoves } from './types.js';
+
 const now = () => new Date().toISOString();
 
 function blankTenant(id, name) {
@@ -16,6 +18,7 @@ function blankTenant(id, name) {
     settings: null,
     purged: {},                   // ids of deleted transactions -> time, so a late re-send is refused
     lastCleanup: null,
+    vanMoves: {},                 // txn UUID -> { date, type, moves: [{van, itemCode, qty}] }; kept when the txn is cleaned up
   };
 }
 
@@ -67,6 +70,9 @@ export class RelayCore {
       if (cur && cur.version >= x.version) { results.push({ id: x.id, accepted: false, duplicate: true, version: cur.version }); continue; }
       const { status, error, tally, pushedVersion, syncedVersion, ...data } = x; // device-only fields are ignored
       t.txns[x.id] = { ...data, createdBy: cur?.createdBy || user, receivedAt: now(), status: 'queued', error: null, conflict: null };
+      t.vanMoves ||= {};
+      const mv = vanMoves(data);
+      if (mv.length) t.vanMoves[x.id] = { date: data.date, type: data.type, moves: mv }; else delete t.vanMoves[x.id];
       this._log(t, { dir: 'device->cloud', id: x.id, number: x.number, version: x.version, result: cur ? 'updated' : 'received' });
       results.push({ id: x.id, accepted: true, version: x.version });
     }
@@ -153,6 +159,26 @@ export class RelayCore {
       .sort((a, b) => (b.archivedAt.localeCompare(a.archivedAt)) || String(b.number).localeCompare(String(a.number))).slice(0, 200);
   }
 
+  /** Stock in each van (from issues, returns and van sales in the app) and, per item, the van sales
+   *  not yet in Tally (Tally's stock figure does not include them yet). Same shape as stock.vans in SQL. */
+  async getVanStock(tid) {
+    const t = this.tenant(tid);
+    const vans = {}, pending = {};
+    for (const [id, e] of Object.entries(t.vanMoves || {})) {
+      for (const m of e.moves) {
+        const v = (vans[m.van] ||= { items: {}, lastIssue: null, lastReturn: null });
+        v.items[m.itemCode] = Math.round(((v.items[m.itemCode] || 0) + m.qty) * 1000) / 1000;
+      }
+      const v = vans[e.moves[0]?.van];
+      if (v && e.type === 'vi' && (!v.lastIssue || e.date > v.lastIssue)) v.lastIssue = e.date;
+      if (v && e.type === 'vr' && (!v.lastReturn || e.date > v.lastReturn)) v.lastReturn = e.date;
+      const x = t.txns[id];
+      if (e.type === 'si' && x && x.status !== 'synced') for (const m of e.moves) pending[m.itemCode] = Math.round(((pending[m.itemCode] || 0) - m.qty) * 1000) / 1000;
+    }
+    for (const v of Object.values(vans)) for (const [k, q] of Object.entries(v.items)) if (!q) delete v.items[k];
+    return { vans, pending };
+  }
+
   async getLog(tid, limit = 100) { return this.tenant(tid).log.slice(-limit).reverse(); }
 
   // ------------------------------------------------------------ connector API
@@ -231,7 +257,7 @@ export class RelayCore {
       if (x.status !== 'queued' && !due) continue;
       const party = t.ledgers[x.partyCode];
       const items = {};
-      for (const l of x.lines || []) { const it = t.items[l.itemCode]; if (it) items[l.itemCode] = { name: it.name, unit: it.unit }; }
+      for (const l of x.lines || []) { const it = t.items[l.itemCode]; if (it) items[l.itemCode] = { name: it.name, unit: it.unit, cost: it.cost || 0 }; }
       const account = x.accountCode ? t.ledgers[x.accountCode]?.name : null;
       out.push({ txn: x, mapping: t.mappings[x.id] || null, names: { party: party?.name || null, items, account }, force: !!x.force });
       if (out.length >= limit) break;

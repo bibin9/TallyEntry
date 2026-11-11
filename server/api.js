@@ -24,6 +24,7 @@ const ROUTES = {
   'POST /api/txns/retry': 'txns.retry',
   'POST /api/txns/resolve': 'txns.resolve',
   'GET /api/log': 'log',
+  'GET /api/van-stock': 'stock.vans',
   'GET /api/connector-status': 'connectorinfo',
   'POST /api/connector/hello': 'connector.hello',
   'POST /api/connector/state': 'connector.state',

@@ -125,6 +125,11 @@ export class SyncEngine {
       // 4. Settings (VAT, company details, ledger mapping).
       const settings = await this.api.settings();
       if (settings) await db.meta('settings', settings);
+      // 4b. Van stock (issues, returns and van sales from every phone), when the company uses it.
+      if (settings?.vanStock?.enabled && this.api.vanStock) {
+        try { await db.meta('vanStock', { ...(await this.api.vanStock()), at: new Date().toISOString() }); }
+        catch (e) { if (e instanceof NetworkError) throw e; console.warn('Van stock not available', e); }
+      }
       // 5. Housekeeping: keep recent and unsynced transactions; drop old synced ones.
       await this.cleanup(settings?.retentionDays ?? 2);
       this.lastSync = new Date().toISOString();

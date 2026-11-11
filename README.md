@@ -48,7 +48,8 @@ connector/              Office connector for the Tally PC (Node.js, no dependenc
   windows/              install.cmd: Windows setup (background task, protected key file), check.cmd, uninstall.cmd
 mock-tally/             Simulated Tally on port 9000 for testing the connector
 tdl/QuickEntry.tdl      Tally add-on: QE Code and QE Txn ID fields
-docs/SETUP.md           Setup: Supabase, Cloudflare Pages, office PC, devices, live verification
+docs/SETUP.md           Setup: Supabase, Cloudflare Pages, office PC, devices, live verification, upgrading
+docs/VAN-STOCK.md       Van stock user guide (office and salespeople)
 tests/                  Automated tests (see below)
 ```
 
@@ -65,6 +66,35 @@ QE_PG_URL=postgres://... node tests/e2e-live.mjs         # browser -> Pages Func
 
 The browser tests need Playwright with Chromium. `npm i -D pg` is needed only for the Postgres tests.
 
+## Working on another PC
+
+1. Install **Git** and **Node.js 18 or later** (nodejs.org, LTS). Nothing else is needed to run the app.
+2. Get the code:
+   ```
+   git clone https://github.com/bibin9/TallyEntry.git
+   cd TallyEntry
+   git checkout main            # or a feature branch, e.g. claude/project-thread-8pefyz (van stock) until it is merged
+   git pull
+   ```
+3. Run the demo: `node relay/dev-server.js`, then open http://localhost:8787. Under **More > Van stock** tick **Use van stock** to try van stock with the simulated Tally.
+4. Run the tests: `npm test`. For the Postgres and browser tests:
+   ```
+   npm install                  # installs pg (dev dependency)
+   npm i --no-save playwright && npx playwright install chromium
+   # Postgres 15+ running locally, with an empty database "qe":
+   psql postgres://postgres:PASSWORD@localhost:5432/qe -f relay/supabase/schema.sql
+   QE_PG_URL=postgres://postgres:PASSWORD@localhost:5432/qe npm test
+   node relay/dev-server.js --port 8787 &   then   node tests/e2e.mjs  and  node tests/e2e-vans.mjs
+   ```
+5. Deploying: a push or merge to `main` makes Cloudflare Workers Builds deploy https://tallyentry.quickentry.workers.dev; every other branch gets its own preview address (shown on the pull request). After a change to `relay/supabase/schema.sql`, run the whole file again in the Supabase SQL editor (safe to re-run). After a change to `app/core/` or `connector/`, give office PCs the new office setup package (see docs/SETUP.md, "Upgrading").
+
+## Versions
+
+| Version | Office package | Connector | What changed |
+| --- | --- | --- | --- |
+| 0.4 (app) | QuickEntry-Office-Setup v1.3 | 0.3.0 | Van stock: issue to van, van sales from the van's godown, end-of-day return (Stock Journals). Needs the updated `schema.sql`. |
+| 0.3 (app) | v1.2 | 0.2.2 | Balances, overdue, credit terms, price levels and live stock from Tally. |
+
 ## Key design points
 
 - **Stable codes.** Masters are matched by a code stored in Tally (QE Code field), never by name. The connector assigns codes to masters that have none and writes them back to Tally. Tally's GUID is stored as a cross-check.
@@ -72,4 +102,5 @@ The browser tests need Playwright with Chromium. `npm i -D pg` is needed only fo
 - **No duplicates.** Every transaction has a UUID made on the device and a version number. The server ignores versions it already has. Before creating a voucher, the connector looks for the UUID in Tally (QE Txn ID), so a lost reply cannot cause a second voucher. Edits alter the mapped voucher.
 - **Conflicts.** If the voucher's AlterID in Tally changed since the last sync, the app's edit is held as Conflict until the office chooses (BRD Q6; default "Tally wins").
 - **Nothing lost.** Everything is written to IndexedDB first. Unsynced entries are never removed; synced ones are kept for 2 days (configurable).
+- **Van stock.** Optional: each salesperson's van is a Tally godown. Issue to van and end-of-day return post as Stock Journals; a salesperson's invoices take stock from their van. See docs/VAN-STOCK.md and docs/SETUP.md, section 5a.
 - **Configurable tax.** Rates, labels, currency, inclusive pricing and rounding are settings.

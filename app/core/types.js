@@ -23,9 +23,44 @@ export const TYPES = {
     fields: ['date', 'party', 'supplierInvNo', 'lines', 'narration'],
     note: 'Purchase workflow awaiting client confirmation (BRD Q4). Built as a Purchase voucher from a supplier invoice.',
   },
+  // Van stock: moving goods between the office store and a salesperson's van (Tally godowns).
+  vi: {
+    code: 'vi', name: 'Issue to Van', short: 'Issue to van', prefix: 'VI', kind: 'transfer',
+    vchType: 'Stock Journal', docTitle: 'STOCK ISSUE TO VAN', icon: 'VI', dir: 'out',
+    fields: ['date', 'van', 'lines', 'narration'],
+  },
+  vr: {
+    code: 'vr', name: 'Return from Van', short: 'Van return', prefix: 'VR', kind: 'transfer',
+    vchType: 'Stock Journal', docTitle: 'STOCK RETURN FROM VAN', icon: 'VR', dir: 'in',
+    fields: ['date', 'van', 'lines', 'narration'],
+  },
 };
 
 export const TYPE_ORDER = ['si', 'rc', 'so', 'pi'];
+export const VAN_TYPES = ['vi', 'vr'];
+
+/** Van stock settings with defaults. vans: [{ id, name, godown, user }] where user is a user code. */
+export function vanConfig(settings) {
+  const v = settings?.vanStock || {};
+  return { enabled: !!v.enabled, officeGodown: v.officeGodown || 'Main Location', vans: Array.isArray(v.vans) ? v.vans : [] };
+}
+
+/** The van a user sells from, or null (office stock). */
+export function vanForUser(settings, userCode) {
+  const c = vanConfig(settings);
+  return c.enabled && userCode ? c.vans.find((v) => v.user === userCode) || null : null;
+}
+
+/**
+ * How a transaction changes van stock: [{ van, itemCode, qty }] with qty signed (+ into the van).
+ * Issue adds to the van, return and van sales take from it. Cancelled entries change nothing.
+ */
+export function vanMoves(txn) {
+  if (!txn || txn.cancelled || !txn.van) return [];
+  const sign = txn.type === 'vi' ? 1 : txn.type === 'vr' || txn.type === 'si' ? -1 : 0;
+  if (!sign) return [];
+  return (txn.lines || []).filter((l) => l.itemCode && Number(l.qty)).map((l) => ({ van: String(txn.van), itemCode: l.itemCode, qty: sign * Number(l.qty) }));
+}
 
 /** Ledger groups that count as customers / suppliers / payment accounts. */
 export const GROUPS = {

@@ -28,6 +28,7 @@ if (!url) {
         masters: (since) => call(ut, 'masters', { since }), push: (txns) => call(ut, 'txns.push', { txns }),
         statuses: (ids) => call(ut, 'txns.status', { ids }), retry: (ids) => call(ut, 'txns.retry', { ids }),
         resolve: (id, choice) => call(ut, 'txns.resolve', { id, choice }), log: () => call(ut, 'log'),
+        vanStock: () => call(ut, 'stock.vans'), saveSettings: (st) => call(ut, 'settings.put', st),
       },
       cleanup: () => pool.query('delete from tenants where id = $1', [tid]),
     };

@@ -1,6 +1,6 @@
 // Service worker: keeps the app shell on the device so it opens with no internet.
 // API calls (/api/...) are never cached; data lives in IndexedDB.
-const VERSION = 'qe-0.3.5';
+const VERSION = 'qe-0.4.0';
 const SHELL = [
   './',
   './core/connector-core.js',
